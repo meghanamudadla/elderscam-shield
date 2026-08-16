@@ -1,0 +1,26 @@
+# Scam Shield — one-command deployment (any machine with Docker).
+#
+#   docker compose up -d --build
+#   -> frontend on http://localhost:8080  (nginx + SPA + /api proxy)
+#   -> backend on the internal network only (not published)
+#
+# Set your Groq key before starting, e.g. in a .env file next to this file:
+#   GROQ_API_KEY=gsk_...
+# Without it, the backend falls back to the offline mock reasoner (demo mode).
+
+services:
+  backend:
+    build: ./backend
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

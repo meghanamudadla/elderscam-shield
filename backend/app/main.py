@@ -1,0 +1,82 @@
+"""Scam Shield API.
+
+Run:  uvicorn app.main:app --reload   (from backend/)
+"""
+
+import datetime as dt
+import logging
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+
+from .langgraph_pipeline import run_pipeline
+from .schemas import AnalyzeRequest, ReportIn, VerdictResponse
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Scam Shield", version="1.0.0")
+
+# Dev-only: allow any origin so the Vite dev server (localhost:5173) can call
+# us. Tighten to an explicit origin allowlist before real deployment.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Community reports are stored in memory for now (dev/demo).
+# TODO(prod): replace with PostgreSQL (or any durable store) before real
+# deployment — in-memory data is lost on restart and not shared across workers.
+REPORTS: list[dict] = []
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/analyze", response_model=VerdictResponse)
+def analyze(req: AnalyzeRequest) -> dict:
+    message = req.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message must not be empty")
+    return run_pipeline(message, req.language)
+
+
+@app.post("/reports")
+def create_report(report: ReportIn) -> dict:
+    REPORTS.append(
+        {
+            "snippet": report.snippet,
+            "verdict": report.verdict,
+            "category": report.category,
+            "reported_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+    )
+    return {"count": len(REPORTS)}
+
+
+@app.get("/reports")
+def list_reports(limit: int = Query(5, ge=1, le=50)) -> list[dict]:
+    return REPORTS[-limit:][::-1]
+
+
+@app.get("/reports/summary")
+def reports_summary() -> dict:
+    """Count reports grouped by category, most frequent first.
+
+    Response shape: {"categories": [{"category": "...", "count": N}, ...], "total": M}
+    """
+    counts: dict[str, int] = {}
+    for report in REPORTS:
+        category = report.get("category") or "other"
+        counts[category] = counts.get(category, 0) + 1
+    categories = sorted(
+        ({"category": category, "count": count} for category, count in counts.items()),
+        key=lambda item: item["count"],
+        reverse=True,
+    )
+    return {"categories": categories, "total": len(REPORTS)}

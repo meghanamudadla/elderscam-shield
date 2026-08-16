@@ -1,0 +1,16 @@
+# Scam Shield — Netlify config.
+# Builds the static frontend and proxies /api/* to the deployed backend, so
+# the app keeps using same-origin calls (no CORS, no build-time env needed).
+#  1. Deploy the backend separately (Render/Railway/Fly.io — see DEPLOY.md)
+#  2. Replace the proxy target below with your backend URL
+#  3. Push this repo to GitHub and import it on Netlify (root: frontend)
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[[redirects]]
+  from = "/api/*"
+  to = "https://YOUR-BACKEND-URL.example.com/:splat"
+  status = 200
+  force = true
