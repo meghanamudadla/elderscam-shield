@@ -35,6 +35,7 @@ const COPY = {
     ocrEmpty: "Couldn't find any text in that image — try a clearer screenshot.",
     ocrBadFile: 'Please upload an image file.',
     ocrFailed: 'Something went wrong reading that image. Please try again.',
+    reviewOcrText: 'Extracted from your screenshot — please check it looks right before checking.',
     examplesLabel: 'Or try an example:',
     examples: [
       { label: 'KYC alert', text: 'Your bank account will be blocked in 24 hours! Your KYC has expired. Click this link immediately to update your KYC details and avoid penalty.' },
@@ -52,9 +53,10 @@ const COPY = {
     reasoningLabel: 'Why we think so',
     redFlagsLabel: 'Red flags we found',
     adviceLabel: 'What to do next',
-    listen: 'Listen to the explanation',
-    listeningLabel: 'Speaking…',
-    listenUnsupported: 'Voice output is not supported in this browser.',
+    listen: 'Listen',
+    pause: 'Pause',
+    resume: 'Resume',
+    speakError: 'Could not load the audio explanation. Please try again.',
     flag: 'Flag this — someone tried this on me too',
     flagged: 'Flagged — thank you for helping others.',
     flagError: 'Could not flag this message. Please try again.',
@@ -101,6 +103,7 @@ const COPY = {
     ocrEmpty: 'ఆ చిత్రంలో ఎటువంటి అక్షరాలు కనిపించలేదు — మరింత స్పష్టమైన స్క్రీన్‌షాట్ ప్రయత్నించండి.',
     ocrBadFile: 'దయచేసి చిత్రం (ఇమేజ్) ఫైల్ అప్‌లోడ్ చేయండి.',
     ocrFailed: 'ఆ చిత్రాన్ని చదవడంలో ఏదో సమస్య జరిగింది. మళ్ళీ ప్రయత్నించండి.',
+    reviewOcrText: 'మీ స్క్రీన్‌షాట్ నుండి సంగ్రహించబడింది — తనిఖీ చేసే ముందు అది సరిగ్గా ఉందని నిర్ధారించుకోండి.',
     examplesLabel: 'లేదా ఉదాహరణ ప్రయత్నించండి:',
     examples: [
       { label: 'KYC హెచ్చరిక', text: 'మీ బ్యాంక్ ఖాతా 24 గంటల్లో బ్లాక్ అవుతుంది! మీ KYC గడువు ముగిసింది. వెంటనే ఈ లింక్ పై క్లిక్ చేసి మీ KYC నవీకరించండి.' },
@@ -118,9 +121,10 @@ const COPY = {
     reasoningLabel: 'మేము ఎందుకు అలా అనుకుంటున్నాము',
     redFlagsLabel: 'మేము గుర్తించిన హెచ్చరికలు',
     adviceLabel: 'తర్వాత ఏమి చేయాలి',
-    listen: 'వివరణ వినండి',
-    listeningLabel: 'చెబుతున్నాం…',
-    listenUnsupported: 'ఈ బ్రౌజర్ లో వాయిస్ అవుట్‌పుట్ సపోర్ట్ చేయదు.',
+    listen: 'వినండి',
+    pause: 'విరామం',
+    resume: 'కొనసాగించండి',
+    speakError: 'ఆడియో వివరణ లోడ్ చేయలేకపోయాం. మళ్ళీ ప్రయత్నించండి.',
     flag: 'దీన్ని నివేదించండి — నాకూ ఇలాంటిదే వచ్చింది',
     flagged: 'నివేదించారు — ఇతరులకు సహాయం చేసినందుకు ధన్యవాదాలు.',
     flagError: 'ఈ సందేశాన్ని నివేదించలేకపోయాం. మళ్ళీ ప్రయత్నించండి.',
@@ -170,10 +174,15 @@ export default function App() {
   const [status, setStatus] = useState('checking')
   const [listening, setListening] = useState(false)
   const [micNote, setMicNote] = useState('')
-  const [speaking, setSpeaking] = useState(false)
   const [listenNote, setListenNote] = useState('')
   const [ocrLoading, setOcrLoading] = useState(false)
   const [ocrNote, setOcrNote] = useState('')
+  const [justOcred, setJustOcred] = useState(false)
+
+  // Audio playback: caches the Audio object + object URL so pause can resume
+  // from the same position without re-fetching from the backend.
+  const [audioState, setAudioState] = useState('idle') // "idle" | "playing" | "paused"
+  const audioRef = useRef(null) // { audio, url }
 
   const [flagged, setFlagged] = useState(false)
   const [flagNote, setFlagNote] = useState('')
@@ -183,6 +192,12 @@ export default function App() {
   const recognitionRef = useRef(null)
   const fileInputRef = useRef(null)
   const analyzedTextRef = useRef('')
+
+  // Always read the CURRENT lang at call time (never a stale closure value).
+  const langRef = useRef(lang)
+  useEffect(() => {
+    langRef.current = lang
+  }, [lang])
 
   // ---- backend health + community feed on mount ---------------------------
   useEffect(() => {
@@ -219,6 +234,17 @@ export default function App() {
     }
   }, [])
 
+// ---- audio playback ------------------------------------------------------
+  const clearAudio = useCallback(() => {
+    const cached = audioRef.current
+    if (cached) {
+      cached.audio.pause()
+      URL.revokeObjectURL(cached.url)
+      audioRef.current = null
+    }
+    setAudioState('idle')
+  }, [])
+
   // ---- core actions --------------------------------------------------------
   const runAnalysis = useCallback(
     async (textOverride) => {
@@ -229,14 +255,16 @@ export default function App() {
       setResultError('')
       setFlagNote('')
       setFlagged(false)
+      setJustOcred(false)
       analyzedTextRef.current = text
       try {
         const res = await fetch(`${API_BASE}/analyze`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, language: lang }),
+          body: JSON.stringify({ message: text, language: langRef.current }),
         })
         if (!res.ok) throw new Error(String(res.status))
+        clearAudio() // new verdict → old audio must not carry over
         setResult(await res.json())
       } catch {
         setResultError(t.resultError)
@@ -244,7 +272,7 @@ export default function App() {
         setLoading(false)
       }
     },
-    [message, loading, lang, t]
+    [message, loading, t, clearAudio]
   )
 
   // ---- voice input ----------------------------------------------------------
@@ -282,6 +310,7 @@ export default function App() {
     }
     setOcrLoading(true)
     setOcrNote('')
+    setJustOcred(false)
     try {
       // Always load both scripts: scam screenshots are often English text
       // even when the user's UI language is Telugu.
@@ -293,8 +322,11 @@ export default function App() {
           setOcrNote(t.ocrEmpty)
           return
         }
+        // Fill the textarea with the extracted text but do NOT auto-analyze:
+        // OCR often mangles the text, so the user reviews/edits it first and
+        // presses the explicit Check button themselves.
         setMessage(text)
-        runAnalysis(text) // same behavior as clicking an example chip
+        setJustOcred(true)
       } finally {
         await worker.terminate()
       }
@@ -305,21 +337,44 @@ export default function App() {
     }
   }
 
-  // ---- text-to-speech explanation ------------------------------------------
-  const listen = () => {
-    if (!result) return
-    if (!('speechSynthesis' in window)) {
-      setListenNote(t.listenUnsupported)
+  // ---- audio explanation (POST /speak + cached Audio for pause/resume) ----
+  const playAudio = useCallback(async () => {
+    setListenNote('')
+    if (audioRef.current) {
+      await audioRef.current.audio.play()
+      setAudioState('playing')
       return
     }
-    const text = `${result.reasoning}. ${result.advice.join('. ')}`
-    const utterance = new SpeechSynthesisUtterance(text)
-    utterance.lang = lang === 'te' ? 'te-IN' : 'en-IN'
-    utterance.rate = 0.95
-    utterance.onend = () => setSpeaking(false)
-    window.speechSynthesis.cancel()
-    window.speechSynthesis.speak(utterance)
-    setSpeaking(true)
+    try {
+      const res = await fetch(`${API_BASE}/speak`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: analyzedTextRef.current }),
+      })
+      if (!res.ok) throw new Error(String(res.status))
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const audio = new Audio(url)
+      audio.onended = () => clearAudio()
+      audioRef.current = { audio, url }
+      await audio.play()
+      setAudioState('playing')
+    } catch {
+      clearAudio()
+      setListenNote(t.speakError)
+    }
+  }, [clearAudio, t])
+
+  const toggleAudio = () => {
+    if (audioState === 'playing') {
+      audioRef.current?.audio.pause()
+      setAudioState('paused')
+    } else if (audioState === 'paused') {
+      audioRef.current?.audio.play()
+      setAudioState('playing')
+    } else {
+      playAudio()
+    }
   }
 
   // ---- community flagging ----------------------------------------------------
@@ -473,7 +528,10 @@ export default function App() {
           />
           <textarea
             value={message}
-            onChange={(e) => setMessage(e.target.value)}
+            onChange={(e) => {
+              setMessage(e.target.value)
+              setJustOcred(false)
+            }}
             placeholder={t.inputPlaceholder}
             rows={5}
             style={{
@@ -490,6 +548,12 @@ export default function App() {
               outline: 'none',
             }}
           />
+
+          {justOcred && (
+            <p style={{ color: COLORS.accent, fontSize: 14, margin: '12px 0 0' }}>
+              {t.reviewOcrText}
+            </p>
+          )}
 
           <div style={{ display: 'flex', gap: 12, marginTop: 16, flexWrap: 'wrap' }}>
             <button
@@ -683,7 +747,7 @@ export default function App() {
 
             <div style={{ display: 'flex', gap: 12, marginTop: 24, flexWrap: 'wrap' }}>
               <button
-                onClick={listen}
+                onClick={toggleAudio}
                 className="btn-secondary"
                 style={{
                   background: 'transparent',
@@ -696,7 +760,11 @@ export default function App() {
                   cursor: 'pointer',
                 }}
               >
-                {speaking ? t.listeningLabel : t.listen}
+                {audioState === 'playing'
+                  ? `⏸ ${t.pause}`
+                  : audioState === 'paused'
+                    ? `▶ ${t.resume}`
+                    : `🔊 ${t.listen}`}
               </button>
 
               {result.verdict !== 'safe' && (

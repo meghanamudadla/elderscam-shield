@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { COLORS, FONT, PAGE_STYLES } from './tokens.js'
 
 // ---------------------------------------------------------------------------
@@ -182,6 +182,13 @@ export default function Gauntlet() {
   const [checking, setChecking] = useState(false)
   const [finished, setFinished] = useState(false)
 
+  // Always send whatever lang is CURRENTLY selected at /analyze call time,
+  // never a value captured in a stale closure.
+  const langRef = useRef(lang)
+  useEffect(() => {
+    langRef.current = lang
+  }, [lang])
+
   const total = deck.length
   const item = deck[round]
   const answered = guess !== null
@@ -205,7 +212,7 @@ export default function Gauntlet() {
       const res = await fetch(`${API_BASE}/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: item.text[lang], language: lang }),
+        body: JSON.stringify({ message: item.text[langRef.current], language: langRef.current }),
       })
       if (!res.ok) throw new Error(String(res.status))
       setAnalysis(await res.json())

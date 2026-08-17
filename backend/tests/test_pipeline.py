@@ -74,5 +74,32 @@ def test_pipeline_cases():
     print("All pipeline tests passed.")
 
 
+def test_telugu_response_is_actually_telugu():
+    msg = "మీకు నెలకు 60,000 జీతంతో వర్క్ ఫ్రమ్ హోమ్ జాబ్ ఇస్తున్నాము. నమోదు చేయడానికి మీ వివరాలు నిర్ధారించండి."
+    result = run_pipeline(msg, "te")
+    telugu_chars = sum(1 for ch in result["reasoning"] if 0x0C00 <= ord(ch) <= 0x0C7F)
+    assert telugu_chars > 10, f"reasoning is not actually in Telugu: {result['reasoning']}"
+    assert "Closest match" not in result["reasoning"]
+    assert '"' not in result["reasoning"] or "—" not in result["reasoning"]  # no leaked raw-quote-plus-dash pattern
+    print("Telugu language-conformance test passed.")
+
+
+def test_telugu_all_fields_are_telugu():
+    msg = "మీ బ్యాంక్ ఖాతా బ్లాక్ అవుతుంది, వెంటనే ఈ లింక్‌పై క్లిక్ చేయండి"
+    result = run_pipeline(msg, "te")
+
+    def has_telugu(s):
+        return any(0x0C00 <= ord(ch) <= 0x0C7F for ch in s)
+
+    assert has_telugu(result["reasoning"]), f"reasoning not Telugu: {result['reasoning']}"
+    for flag in result["red_flags"]:
+        assert has_telugu(flag), f"red flag not Telugu: {flag}"
+    for step in result["advice"]:
+        assert has_telugu(step), f"advice not Telugu: {step}"
+    print("All-fields Telugu test passed.")
+
+
 if __name__ == "__main__":
     test_pipeline_cases()
+    test_telugu_response_is_actually_telugu()
+    test_telugu_all_fields_are_telugu()
