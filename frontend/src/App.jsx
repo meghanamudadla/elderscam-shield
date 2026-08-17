@@ -391,6 +391,23 @@ export default function App() {
   // Fallback chain: backend TTS -> browser speech synthesis -> inline note.
   // A /speak failure (e.g. no internet on the backend) must never dead-end;
   // the click handler keeps working and the rest of the UI is unaffected.
+
+  // The spoken text is built EXCLUSIVELY from the verdict result — reasoning,
+  // then every red flag, then every advice item — so the result-card
+  // "Listen" button reads back the explanation, never the raw input message.
+  // This function must never reference the `message` state (that stays the
+  // job of the separate input-area voice buttons).
+  const buildSpokenExplanation = useCallback((verdictResult) => {
+    if (!verdictResult) return ''
+    return [
+      verdictResult.reasoning,
+      ...(verdictResult.red_flags || []),
+      ...(verdictResult.advice || []),
+    ]
+      .filter(Boolean)
+      .join('. ')
+  }, [])
+
   const playAudio = useCallback(async () => {
     setListenNote('')
     if (audioRef.current) {
@@ -398,11 +415,13 @@ export default function App() {
       setAudioState('playing')
       return
     }
+    const spokenText = buildSpokenExplanation(result)
+    if (!spokenText) return // no result to read (button only renders with one)
     try {
       const res = await fetch(`${API_BASE}/speak`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: analyzedTextRef.current, language: langRef.current }),
+        body: JSON.stringify({ message: spokenText, language: langRef.current }),
       })
       if (!res.ok) throw new Error(String(res.status))
       const blob = await res.blob()
@@ -414,11 +433,11 @@ export default function App() {
       setAudioState('playing')
     } catch {
       clearAudio()
-      if (!speakWithBrowserFallback(result?.reasoning || analyzedTextRef.current)) {
+      if (!speakWithBrowserFallback(spokenText)) {
         setListenNote(t.audioUnavailable)
       }
     }
-  }, [clearAudio, result, speakWithBrowserFallback, t])
+  }, [buildSpokenExplanation, clearAudio, result, speakWithBrowserFallback, t])
 
   const toggleAudio = () => {
     if (audioState === 'playing') {
