@@ -16,3 +16,8 @@ frontend/dist/
 # misc
 *.log
 .DS_Store
+
+# Python virtual environment
+backend/venv/
+venv/
+.venv/
