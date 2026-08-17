@@ -18,7 +18,7 @@ The app runs at <http://127.0.0.1:8000>. Docs (auto-generated): <http://127.0.0.
 
 | Variable       | Required | Purpose                                                            |
 |----------------|----------|--------------------------------------------------------------------|
-| `GROQ_API_KEY` | optional | If set, verdicts come from Groq's `llama-3.3-70b-versatile`. If unset, the deterministic offline mock reasoner is used (fully functional for demo/testing — no network needed). |
+| `GROQ_API_KEY` | optional | If set, verdicts come from Groq's `openai/gpt-oss-120b`. If unset, the deterministic offline mock reasoner is used (fully functional for demo/testing — no network needed). |
 
 ## Endpoints
 
@@ -26,6 +26,7 @@ The app runs at <http://127.0.0.1:8000>. Docs (auto-generated): <http://127.0.0.
 |--------|------------------|--------------------------------------------------------------------|
 | GET    | `/health`        | Liveness check → `{"status": "ok"}`                                |
 | POST   | `/analyze`       | Body `{"message": "...", "language": "en"\|"te"}` → verdict JSON. 400 on empty message. |
+| POST   | `/speak`         | Body `{"message": "...", "language": "en"\|"te"}` → MP3 audio of the message (gTTS). 503 on TTS failure. |
 | POST   | `/reports`       | Body `{"snippet": "..." (≤200 chars), "verdict": "..."}` → `{"count": N}` |
 | GET    | `/reports?limit=5` | Most recent community reports first.                              |
 
@@ -38,7 +39,23 @@ pytest tests/test_pipeline.py        # or via pytest
 ```
 
 Runs 4 cases through the full pipeline: KYC-urgency scam, safe bill,
-digital-arrest scam, and a Telugu scam message.
+digital-arrest scam, and a Telugu scam message, plus two Telugu-conformance
+checks.
+
+## External network dependencies
+
+Both `/speak` (gTTS) and Telugu translation (deep-translator) call external
+Google-hosted endpoints over the internet. On a machine with no internet
+access — or a network that blocks translate.google.com — they will fail.
+This is expected behaviour, not a bug in the code; fallbacks exist for
+exactly this case:
+
+- Telugu translation fails safe: `translate.py` returns the English text
+  unchanged on any error, so the app stays fully usable (English content
+  instead of Telugu, never a crash).
+- `/speak` returns HTTP 503 with a JSON body. The frontend then falls back
+  to the browser's built-in speech synthesis, and if no matching-language
+  voice exists, to a short inline note pointing at the written explanation.
 
 ## Real vs. placeholder
 

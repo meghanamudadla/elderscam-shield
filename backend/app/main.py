@@ -4,10 +4,13 @@ Run:  uvicorn app.main:app --reload   (from backend/)
 """
 
 import datetime as dt
+import io
 import logging
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from .langgraph_pipeline import run_pipeline
 from .schemas import AnalyzeRequest, ReportIn, VerdictResponse
@@ -44,6 +47,42 @@ def analyze(req: AnalyzeRequest) -> dict:
     if not message:
         raise HTTPException(status_code=400, detail="Message must not be empty")
     return run_pipeline(message, req.language)
+
+
+class SpeakRequest(BaseModel):
+    message: str = Field(..., description="The text to read aloud")
+    language: str = Field("en", description='Spoken language: "en" or "te"')
+
+
+@app.post("/speak")
+def speak(req: SpeakRequest) -> Response:
+    """Text-to-speech via gTTS (a Google-hosted endpoint).
+
+    Returns the MP3 bytes so the frontend can play the written explanation
+    aloud. gTTS requires internet access; on any failure (network blocked,
+    quota, etc.) a 503 JSON body is returned so the frontend knows the
+    service is *temporarily unavailable* rather than broken, and can fall
+    back to browser speech synthesis.
+    """
+    text = req.message.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message must not be empty")
+    try:
+        from gtts import gTTS  # imported lazily so the server boots without it
+
+        tts = gTTS(text=text[:500], lang=req.language or "en")
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        return Response(content=buf.getvalue(), media_type="audio/mpeg")
+    except Exception as exc:  # noqa: BLE001 — any gTTS/network failure → 503
+        logger.warning("TTS failed (%s)", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Speech synthesis is temporarily unavailable — this usually "
+                "means a network connectivity issue. Please try again later."
+            ),
+        ) from exc
 
 
 @app.post("/reports")

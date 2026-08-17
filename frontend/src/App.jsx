@@ -57,6 +57,7 @@ const COPY = {
     pause: 'Pause',
     resume: 'Resume',
     speakError: 'Could not load the audio explanation. Please try again.',
+    audioUnavailable: "Audio isn't available right now — here's the written explanation above.",
     flag: 'Flag this — someone tried this on me too',
     flagged: 'Flagged — thank you for helping others.',
     flagError: 'Could not flag this message. Please try again.',
@@ -125,6 +126,7 @@ const COPY = {
     pause: 'విరామం',
     resume: 'కొనసాగించండి',
     speakError: 'ఆడియో వివరణ లోడ్ చేయలేకపోయాం. మళ్ళీ ప్రయత్నించండి.',
+    audioUnavailable: 'ఆడియో ప్రస్తుతం అందుబాటులో లేదు — పైన ఉన్న వ్రాతపూర్వక వివరణ చదవండి.',
     flag: 'దీన్ని నివేదించండి — నాకూ ఇలాంటిదే వచ్చింది',
     flagged: 'నివేదించారు — ఇతరులకు సహాయం చేసినందుకు ధన్యవాదాలు.',
     flagError: 'ఈ సందేశాన్ని నివేదించలేకపోయాం. మళ్ళీ ప్రయత్నించండి.',
@@ -193,11 +195,32 @@ export default function App() {
   const fileInputRef = useRef(null)
   const analyzedTextRef = useRef('')
 
-  // Always read the CURRENT lang at call time (never a stale closure value).
+  // ---- single source of truth for language ---------------------------------
+  // `lang` state drives BOTH the /analyze request language (via langRef)
+  // and every COPY[lang] label (via t) — there is exactly one language value
+  // in this component. langRef is a live mirror, re-synced after EVERY
+  // render, so no closure can ever read a stale language.
   const langRef = useRef(lang)
   useEffect(() => {
     langRef.current = lang
-  }, [lang])
+  })
+
+  // If a result is showing and the user flips the toggle, the shown content
+  // (generated/translated for the old language) would no longer match the
+  // labels (rendered from the new one). Re-run the analysis in the new
+  // language so the toggle stays the single source of truth end-to-end.
+  const prevLangRef = useRef(lang)
+  useEffect(() => {
+    const changed = prevLangRef.current !== lang
+    prevLangRef.current = lang
+    if (changed && result && analyzedTextRef.current.trim()) {
+      runAnalysis(analyzedTextRef.current)
+    }
+    // runAnalysis is intentionally NOT in deps: it reads langRef at call
+    // time, and it is recreated every render, which would make this effect
+    // fire (and re-analyze) on every render instead of only on toggle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lang, result])
 
   // ---- backend health + community feed on mount ---------------------------
   useEffect(() => {
@@ -236,6 +259,7 @@ export default function App() {
 
 // ---- audio playback ------------------------------------------------------
   const clearAudio = useCallback(() => {
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel()
     const cached = audioRef.current
     if (cached) {
       cached.audio.pause()
@@ -243,6 +267,32 @@ export default function App() {
       audioRef.current = null
     }
     setAudioState('idle')
+  }, [])
+
+  // Warm the browser's voice list at mount so getVoices() is populated when
+  // the /speak fallback needs to check for a matching-language voice.
+  useEffect(() => {
+    if ('speechSynthesis' in window) window.speechSynthesis.getVoices()
+  }, [])
+
+  // Fallback #1 for /speak: speak with the browser's built-in speech
+  // synthesis. Returns false when unavailable or when no voice exists for
+  // the current language, so the caller can show the inline note instead.
+  const speakWithBrowserFallback = useCallback((text) => {
+    if (!('speechSynthesis' in window)) return false
+    const synth = window.speechSynthesis
+    const langPrefix = langRef.current === 'te' ? 'te' : 'en'
+    const voices = synth.getVoices()
+    const matching = voices.find((v) =>
+      (v.lang || '').toLowerCase().startsWith(langPrefix)
+    )
+    if (!matching) return false
+    synth.cancel()
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.lang = langRef.current === 'te' ? 'te-IN' : 'en-IN'
+    if (matching) utterance.voice = matching
+    synth.speak(utterance)
+    return true
   }, [])
 
   // ---- core actions --------------------------------------------------------
@@ -338,6 +388,9 @@ export default function App() {
   }
 
   // ---- audio explanation (POST /speak + cached Audio for pause/resume) ----
+  // Fallback chain: backend TTS -> browser speech synthesis -> inline note.
+  // A /speak failure (e.g. no internet on the backend) must never dead-end;
+  // the click handler keeps working and the rest of the UI is unaffected.
   const playAudio = useCallback(async () => {
     setListenNote('')
     if (audioRef.current) {
@@ -349,7 +402,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/speak`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: analyzedTextRef.current }),
+        body: JSON.stringify({ message: analyzedTextRef.current, language: langRef.current }),
       })
       if (!res.ok) throw new Error(String(res.status))
       const blob = await res.blob()
@@ -361,9 +414,11 @@ export default function App() {
       setAudioState('playing')
     } catch {
       clearAudio()
-      setListenNote(t.speakError)
+      if (!speakWithBrowserFallback(result?.reasoning || analyzedTextRef.current)) {
+        setListenNote(t.audioUnavailable)
+      }
     }
-  }, [clearAudio, t])
+  }, [clearAudio, result, speakWithBrowserFallback, t])
 
   const toggleAudio = () => {
     if (audioState === 'playing') {

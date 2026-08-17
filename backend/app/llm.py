@@ -1,7 +1,7 @@
 """Verdict generation.
 
 Two paths:
-  1. GROQ_API_KEY set        -> real LLM verdict via Groq (llama-3.3-70b-versatile),
+  1. GROQ_API_KEY set        -> real LLM verdict via Groq (openai/gpt-oss-120b),
                                 strictly grounded in the retrieved patterns.
   2. GROQ_API_KEY unset      -> deterministic offline "mock reasoner" so the whole
                                 pipeline is fully testable with no network access.
@@ -9,12 +9,18 @@ Two paths:
 Both paths return the exact same shape:
   {verdict, confidence, reasoning, red_flags[], advice[]}
 
-Language contract (both paths):
-  - when language == "te", every human-facing string (reasoning, every
-    red_flags item, every advice item) is a full Telugu sentence. Retrieved
-    pattern text is NEVER shown verbatim to the user in any language — it is
-    grounding context for reasoning only, never part of the output.
-  - no red_flags/advice item shorter than 10 characters ever reaches the
+Language handling (rearchitected):
+  - Content is ALWAYS generated in English, by both paths, no matter which
+    display language the user requested. Asking the LLM/mock to write Telugu
+    prose natively proved unreliable across several iterations, so generation
+    and translation are now separate steps.
+  - For language == "te", the final English strings are translated by the
+    deterministic translation layer (translate.py, backed by deep-translator)
+    as the very last step, after fragment filtering. For "en", no translation
+    happens at all.
+  - Retrieved pattern text is NEVER shown verbatim to the user in any
+    language — it is grounding context for reasoning only.
+  - No red_flags/advice item shorter than 10 characters ever reaches the
     frontend (stray fragments are dropped; empty lists get a default phrase).
 
 Grounding contract (both paths):
@@ -26,7 +32,7 @@ Grounding contract (both paths):
 import json
 import logging
 import os
-import re
+import time
 
 from dotenv import load_dotenv
 
@@ -35,18 +41,28 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .retrieval import RetrievedPattern
+from .translate import translate_text
 
 logger = logging.getLogger(__name__)
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
+
+# In-process verdict cache keyed by (message, matched pattern ids). Scam
+# messages circulate verbatim to thousands of people, so repeated analyses
+# of the same text hit this cache instead of the LLM — this is the main
+# defence against the free tier's rate limits (plus a 429 retry below).
+# Cap + FIFO eviction keep memory bounded.
+_VERDICT_CACHE: dict[tuple, dict] = {}
+_VERDICT_CACHE_MAX = 128
+_VERDICT_RETRY_DELAY_S = 1.5
 
 VALID_VERDICTS = ("scam", "suspicious", "safe")
 
-# System prompt for the Groq call. {pattern_lines} and {language_label} are
-# filled in per request. The analogy instruction comes before the JSON-shape
-# instruction so the model prioritizes warm, human explanation. The CRITICAL
-# line enforces the language contract for Telugu responses; the grounding and
-# confidence lines stop generic, copy-pasted answers.
+# System prompt for the Groq call. {pattern_lines} is filled in per request.
+# The analogy instruction comes before the JSON-shape instruction so the
+# model prioritizes warm, human explanation. The model ALWAYS replies in
+# English — Telugu is produced later by the deterministic translate step,
+# never by the model itself.
 SYSTEM_TEMPLATE = """You are Scam Shield, an AI that classifies messages as scam, suspicious, or safe. You MUST base your verdict ONLY on the retrieved scam-pattern excerpts below and on the message itself. Never invent facts, websites, or numbers.
 
 When explaining reasoning, use one short, concrete everyday analogy a non-technical elderly person would immediately recognize (e.g. comparing an urgent bank threat to a stranger demanding your house keys) instead of technical/clinical language. Keep it warm, calm, and reassuring in tone, never alarmist. Your reasoning must reference specific words or phrases from the user's actual message — do not write a generic template that could apply to any message.
@@ -54,7 +70,8 @@ When explaining reasoning, use one short, concrete everyday analogy a non-techni
 Retrieved patterns:
 {pattern_lines}
 
-Reply in {language_label}. CRITICAL: every string value in your JSON response (reasoning, each red_flags item, each advice item) MUST be written entirely in Telugu script (Unicode range U+0C00–U+0C7F), with zero English sentences mixed in, whenever the requested language is Telugu. Do not partially translate — translate fully.
+Reply in English, unconditionally — the requested display language is handled by a separate deterministic translation step after you, so never translate or transliterate your output yourself.
+
 Base your confidence score on how many concrete red flags you found in this specific message — more distinct red flags and stronger keyword/pattern matches should mean higher confidence, weak or single-signal matches should mean lower confidence. Do not default to a round number out of habit.
 Return ONLY raw JSON (no markdown, no fences, no commentary) with exactly these keys:
 {{"verdict": "scam|suspicious|safe", "confidence": <integer 0-100>, "reasoning": "<short explanation referencing the matched pattern>", "red_flags": ["..."], "advice": ["..."]}}"""
@@ -86,7 +103,7 @@ def _has_hidden_chars(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Copy tables
+# Copy tables (English only — Telugu is produced by translate.py)
 # ---------------------------------------------------------------------------
 
 # Per-pattern everyday analogies (EN). The mock reasoner picks the analogy of
@@ -163,73 +180,6 @@ _PATTERN_ANALOGY_EN = {
     ),
 }
 
-# Per-pattern everyday analogies (TE). Full Telugu sentences; no em dashes,
-# no double quotes.
-_PATTERN_ANALOGY_TE = {
-    "kyc-block-urgency": (
-        "ఇది మీ ఇంటి తాళం 24 గంటల్లో పని చేయడం ఆగిపోతుందని చెప్పి, కిటికీ గుండా "
-        "తాళం చెవి ఇచ్చేయమని ఫోన్ లో భయపెట్టినట్లు ఉంది. నిజమైన బ్యాంక్ ఎప్పుడూ "
-        "ఇలా భయం కలిగించి వివరాలు అడగదు."
-    ),
-    "otp-upi-phishing": (
-        "ఇది తలుపు దగ్గర నిలబడిన అపరిచితుడు ఇది నిజమో కాదో చూడటానికి మీ వాలెట్ "
-        "అప్పుగా అడిగినట్లు ఉంది. OTP లేదా PIN అడిగే వ్యక్తి నిజానికి మీ డబ్బునే "
-        "అడుగుతున్నాడు."
-    ),
-    "lottery-prize-fee": (
-        "ఇది వీధిలో ఎవరో పెద్ద బహుమతి ఇస్తామని చెప్పి, ముందుగా డబ్బు ఇవ్వమని "
-        "అడిగినట్లు ఉంది. నిజమైన బహుమతికి ఎప్పుడూ ఫీజు ఉండదు."
-    ),
-    "relative-distress": (
-        "ఇది బంధువు ఇబ్బందులో ఉన్నాడని చెప్పుకుని, రహస్యంగా డబ్బు పంపమని అడిగే "
-        "అపరిచితుడిలా ఉంది. నిజమైన బంధువు మిమ్మల్ని నేరుగా పిలుస్తారు, అపరిచిత "
-        "ఖాతాకు డబ్బు పంపమని అడగరు."
-    ),
-    "fake-delivery-fee": (
-        "ఇది ప్యాకేజీ చూపించే ముందే చిన్న ఫీజు చెల్లించమని డెలివరీ వ్యక్తి అడిగినట్లు "
-        "ఉంది. నిజమైన డెలివరీ సంస్థలు యాప్ ద్వారానే ఛార్జీలు తీసుకుంటాయి."
-    ),
-    "guaranteed-investment": (
-        "ఇది మీ డబ్బు కొన్ని రోజుల్లో రెట్టింపు అవుతుందని చెప్పి ఇప్పుడే ఇచ్చేయమని "
-        "అడిగే వ్యక్తిలా ఉంది. హామీ ఇచ్చే పెట్టుబడి అంటే మీ డబ్బు పోతుందని హామీ."
-    ),
-    "govt-scheme-processing-fee": (
-        "ఇది ప్రభుత్వ పథకం డబ్బు రావాలంటే ముందుగా ఫీజు కట్టమని చెప్పే వ్యక్తిలా "
-        "ఉంది. నిజమైన ప్రభుత్వ పథకాలు ప్రాసెసింగ్ ఫీజు అడగవు."
-    ),
-    "fake-customer-care": (
-        "ఇది మీ బిల్లు విఫలమైందని చెప్పి, కార్డు వివరాలు అడిగే వ్యక్తిలా ఉంది. "
-        "నిజమైన కంపెనీలు వాటి అధికారిక నంబర్ నుండే సంప్రదిస్తాయి."
-    ),
-    "job-advance-fee": (
-        "ఇది ఉద్యోగం ఇస్తామని చెప్పి, పని ప్రారంభించే ముందే డబ్బు కట్టమని అడిగే "
-        "యజమానిలా ఉంది. నిజమైన ఉద్యోగం మీకు డబ్బు ఇస్తుంది, మిమ్మల్ని డబ్బు "
-        "అడగదు."
-    ),
-    "digital-arrest": (
-        "ఇది యూనిఫాం ధరించిన వ్యక్తి తలుపు దగ్గర నిలబడి ఇంట్లోనే ఉండమని, డబ్బు "
-        "కట్టమని ఆదేశించినట్లు ఉంది. నిజమైన పోలీసులు ఫోన్ లో అరెస్ట్ చేయరు "
-        "లేదా డబ్బు అడగరు."
-    ),
-    "vishing-bank-tax-official": (
-        "ఇది ఒకే వ్యక్తి బ్యాంక్ మరియు పన్ను శాఖ తరపున మాట్లాడుతూ, డబ్బు "
-        "కాపాడటానికి వేరే ఖాతాకు బదిలీ చేయమని అడిగినట్లు ఉంది. అధికారులు "
-        "ఎప్పుడూ ఇలా అడగరు."
-    ),
-    "routine-bill": (
-        "ఇది తెలిసిన పోస్ట్‌మేన్ మీరు ఎదురుచూస్తున్న సాధారణ లేఖను ఇచ్చినట్లు "
-        "ఉంది. భయం లేని, తొందర లేని సాధారణ బిల్లు ఇది."
-    ),
-    "user-triggered-otp": (
-        "ఇది మీరే చేసిన లావాదేవీకి వచ్చిన రసీదులా ఉంది. మీరే అడిగిన OTP "
-        "సాధారణమే, దాన్ని ఎవరికీ ఇవ్వకండి."
-    ),
-    "known-contact-routine": (
-        "ఇది పక్కింటి వారు నమస్కారం చెప్పినట్లు ఉంది. మీకు తెలిసిన వ్యక్తి నుండి "
-        "వచ్చిన సాధారణ సందేశం, డబ్బు గురించి ఏమీ లేదు."
-    ),
-}
-
 # Generic fallback analogies per verdict, used only when the top pattern has
 # no dedicated template above. These are the original everyday analogies.
 _REASONING_EN = {
@@ -248,22 +198,6 @@ _REASONING_EN = {
         "were already expecting — no need to worry."
     ),
 }
-_REASONING_TE = {
-    "scam": (
-        "ఇది ఒక అపరిచితుడు మీ ఇంటి తలుపు కొట్టి, వెంటనే తెరవకపోతే చాలా అనర్థం "
-        "జరుగుతుందని భయపెడుతున్నట్లు ఉంది. నిజమైన బ్యాంక్ లేదా అధికారి ఎప్పుడూ "
-        "ఇలా భయం కలిగించరు."
-    ),
-    "suspicious": (
-        "ఇది మర్యాదగా తలుపు తట్టి, కిటికీ గుండా మెల్లగా చూస్తున్న వ్యక్తిలా ఉంది. "
-        "బహుశా నిర్దోషి కావచ్చు, కానీ తలుపు తెరిచే ముందు వారు ఎవరో తెలుసుకోవడం "
-        "తెలివైన పని."
-    ),
-    "safe": (
-        "ఇది తెలిసిన పోస్ట్‌మేన్ మీరు ఎదురుచూస్తున్న సాధారణ లేఖను అందించినట్లు "
-        "ఉంది, భయపడాల్సిన అవసరం లేదు."
-    ),
-}
 
 # Short verdict-specific caution lines appended after the pattern analogy.
 _VERDICT_CAUTION_EN = {
@@ -276,17 +210,6 @@ _VERDICT_CAUTION_EN = {
         "acting, especially if it asks for money, OTPs, or personal information."
     ),
     "safe": "Treat this as safe: no action is needed.",
-}
-_VERDICT_CAUTION_TE = {
-    "scam": (
-        "దీన్ని మోసంగానే పరిగణించండి: బదులివ్వవద్దు, వివరాలు పంచుకోవద్దు, "
-        "లింక్ పై క్లిక్ చేయవద్దు."
-    ),
-    "suspicious": (
-        "దీన్ని అనుమానాస్పదంగా పరిగణించండి: ఏదైనా చర్యకు ముందు అధికారిక మార్గం "
-        "ద్వారా ధృవీకరించండి, ముఖ్యంగా డబ్బు, OTP లేదా వివరాలు అడిగితే."
-    ),
-    "safe": "దీన్ని సురక్షితంగా పరిగణించవచ్చు: ఎటువంటి చర్య అవసరం లేదు.",
 }
 
 # Human-readable pattern names, used in the "matches the pattern of ..." line.
@@ -306,22 +229,6 @@ _PATTERN_LABEL_EN = {
     "user-triggered-otp": "user-triggered OTP",
     "known-contact-routine": "known contact",
 }
-_PATTERN_LABEL_TE = {
-    "kyc-block-urgency": "KYC బ్లాక్ భయం",
-    "otp-upi-phishing": "OTP/PIN ఫిషింగ్",
-    "lottery-prize-fee": "లాటరీ బహుమతి ఫీజు",
-    "relative-distress": "బంధువు ఇబ్బంది",
-    "fake-delivery-fee": "నకిలీ డెలివరీ ఫీజు",
-    "guaranteed-investment": "నకిలీ పెట్టుబడి",
-    "govt-scheme-processing-fee": "ప్రభుత్వ పథకం ఫీజు",
-    "fake-customer-care": "నకిలీ కస్టమర్ కేర్",
-    "job-advance-fee": "ఉద్యోగ అడ్వాన్స్ ఫీజు",
-    "digital-arrest": "డిజిటల్ అరెస్ట్",
-    "vishing-bank-tax-official": "బ్యాంక్/పన్ను అధికారి నటన",
-    "routine-bill": "సాధారణ బిల్లు",
-    "user-triggered-otp": "మీరే ప్రారంభించిన OTP",
-    "known-contact-routine": "తెలిసిన వ్యక్తి సందేశం",
-}
 
 _ADVICE_EN = {
     "scam": [
@@ -340,25 +247,6 @@ _ADVICE_EN = {
         "No action needed — this looks like an ordinary routine message.",
         "If it mentions an OTP you did not request, delete it and do not share it.",
         "Keep using official apps and websites for payments.",
-    ],
-}
-_ADVICE_TE = {
-    "scam": [
-        "బదులివ్వవద్దు, లింక్ లపై క్లిక్ చేయవద్దు, ఆ నంబర్ కు తిరిగి కాల్ చేయవద్దు.",
-        "OTP, UPI PIN, CVV లేదా బ్యాంక్ వివరాలను ఎవరితోనూ పంచుకోవద్దు.",
-        "పంపినవారిని బ్లాక్ చేయండి మరియు మీ బ్యాంక్ కు లేదా పోలీసులకు (సైబర్ సెల్ / 1930) నివేదించండి.",
-        "ఏదైనా చేయడానికి ముందు కుటుంబ సభ్యుడికి లేదా స్నేహితుడికి ఈ సందేశం గురించి చెప్పండి.",
-    ],
-    "suspicious": [
-        "వెంటనే చర్య తీసుకోకండి. తొందరగా చేయమని ఒత్తిడి చేయడమే ఒక హెచ్చరిక సంకేతం.",
-        "అధికారిక మార్గం ద్వారా ధృవీకరించండి (బ్యాంక్ యాప్, ప్రభుత్వ వెబ్‌సైట్, అధికారిక ఫోన్ నంబర్).",
-        "OTP, PIN లేదా డబ్బు అడిగితే నిరూపించబడే వరకు దాన్ని మోసంగానే పరిగణించండి.",
-        "పంపినవారి నంబర్ ను సంస్థ యొక్క అధికారిక కాంటాక్ట్ తో సరిపోల్చండి.",
-    ],
-    "safe": [
-        "ఎటువంటి చర్య అవసరం లేదు. ఇది సాధారణ రొటీన్ సందేశంగా కనిపిస్తోంది.",
-        "మీరు అడగని OTP గురించి ఉంటే దాన్ని డిలీట్ చేయండి మరియు ఎవరికీ ఇవ్వవద్దు.",
-        "చెల్లింపుల కోసం అధికారిక యాప్ లు మరియు వెబ్‌సైట్ లను మాత్రమే ఉపయోగించండి.",
     ],
 }
 
@@ -411,129 +299,18 @@ _FLAG_EN = {
     "processing": "The message asks for a processing fee.",
 }
 
-# English scam keyword -> Telugu red-flag sentence. Full Telugu sentences.
-_FLAG_TE = {
-    "urgent": "అత్యవసరమని ఒత్తిడి చేస్తోంది",
-    "immediately": "వెంటనే చేయమని ఒత్తిడి చేస్తోంది",
-    "otp": "OTP అడుగుతోంది",
-    "pin": "PIN అడుగుతోంది",
-    "cvv": "CVV అడుగుతోంది",
-    "arrest": "అరెస్ట్ చేస్తామని బెదిరిస్తోంది",
-    "won": "మీరు గెలిచారని చెబుతోంది",
-    "winner": "మీరు బహుమతి గెలిచారని చెబుతోంది",
-    "click here": "లింక్ పై క్లిక్ చేయమని చెబుతోంది",
-    "link": "ఒక లింక్ పంపుతోంది",
-    "kyc": "KYC గడువు ముగిసిందని చెబుతోంది",
-    "blocked": "ఖాతా బ్లాక్ అవుతుందని చెబుతోంది",
-    "block": "ఖాతా బ్లాక్ అవుతుందని చెబుతోంది",
-    "account": "బ్యాంక్ ఖాతా గురించి చెబుతోంది",
-    "refund": "రీఫండ్ ఇస్తామని చెబుతోంది",
-    "fee": "ఫీజు కట్టమని అడుగుతోంది",
-    "pay": "డబ్బు చెల్లించమని అడుగుతోంది",
-    "send money": "డబ్బు పంపమని అడుగుతోంది",
-    "transfer": "డబ్బు బదిలీ చేయమని అడుగుతోంది",
-    "cbi": "CBI అధికారి పేరు చెబుతోంది",
-    "police": "పోలీసులు అని చెప్పుకుంటోంది",
-    "customs": "కస్టమ్స్ అధికారులు అని చెప్పుకుంటోంది",
-    "lottery": "లాటరీ గురించి చెబుతోంది",
-    "prize": "బహుమతి గురించి చెబుతోంది",
-    "guaranteed": "హామీ ఇస్తున్నామని చెబుతోంది",
-    "returns": "ఎక్కువ లాభం వస్తుందని చెబుతోంది",
-    "double your money": "డబ్బు రెట్టింపు అవుతుందని చెబుతోంది",
-    "aadhaar": "ఆధార్ వివరాలు అడుగుతోంది",
-    "subsidy": "సబ్సిడీ గురించి చెబుతోంది",
-    "scheme": "ఏదో పథకం గురించి చెబుతోంది",
-    "job": "ఉద్యోగం ఇస్తామని చెబుతోంది",
-    "salary": "జీతం గురించి చెబుతోంది",
-    "training": "ట్రైనింగ్ కోసం డబ్బు అడుగుతోంది",
-    "warrant": "వారెంట్ ఉందని చెబుతోంది",
-    "digital arrest": "డిజిటల్ అరెస్ట్ చేస్తామని బెదిరిస్తోంది",
-    "delivery": "డెలివరీ గురించి చెబుతోంది",
-    "courier": "కొరియర్ ప్యాకేజీ గురించి చెబుతోంది",
-    "tax": "పన్ను చెల్లించమని అడుగుతోంది",
-    "pan": "PAN వివరాలు అడుగుతోంది",
-    "money laundering": "మనీ లాండరింగ్ ఆరోపణ చేస్తోంది",
-    "wallet": "వాలెట్ గురించి చెబుతోంది",
-    "reward": "బహుమతి ఇస్తామని చెబుతోంది",
-    "free": "ఉచితంగా ఇస్తామని చెబుతోంది",
-    "processing": "ప్రాసెసింగ్ ఫీజు అడుగుతోంది",
-}
-
-# Bilingual default phrases, used when fragment-filtering empties a list.
+# English default phrases per verdict, used when fragment-filtering empties a
+# list. These are English because the deterministic translation step runs
+# AFTER filtering, so defaults get translated along with everything else.
 _DEFAULT_FLAG = {
-    "en": {
-        "scam": "The message pressures you with urgency or demands personal details.",
-        "suspicious": "The message asks for money, OTPs, or personal information.",
-        "safe": "No red flags were found.",
-    },
-    "te": {
-        "scam": "ఈ సందేశం ఒత్తిడి చేస్తూ వ్యక్తిగత వివరాలు అడుగుతోంది.",
-        "suspicious": "ఈ సందేశం డబ్బు, OTP లేదా వ్యక్తిగత సమాచారం అడుగుతోంది.",
-        "safe": "ఎటువంటి హెచ్చరికలు కనుగొనబడలేదు.",
-    },
+    "scam": "The message pressures you with urgency or demands personal details.",
+    "suspicious": "The message asks for money, OTPs, or personal information.",
+    "safe": "No red flags were found.",
 }
 _DEFAULT_ADVICE = {
-    "en": {
-        "scam": "Do not reply or share anything; report it to your bank or the police (cyber cell / 1930).",
-        "suspicious": "Verify the message through an official channel before acting.",
-        "safe": "No action is needed; keep using official apps and websites.",
-    },
-    "te": {
-        "scam": "బదులివ్వవద్దు లేదా వివరాలు పంచుకోవద్దు; మీ బ్యాంక్ కు లేదా పోలీసులకు (సైబర్ సెల్ / 1930) నివేదించండి.",
-        "suspicious": "చర్య తీసుకునే ముందు అధికారిక మార్గం ద్వారా ధృవీకరించండి.",
-        "safe": "ఎటువంటి చర్య అవసరం లేదు; అధికారిక యాప్ లు మరియు వెబ్‌సైట్ లను ఉపయోగించండి.",
-    },
-}
-
-# Hardcoded, fully-Telugu generic templates used only if the real LLM path
-# twice fails the Telugu language-conformance check. Keyed by verdict.
-_TELUGU_FALLBACK = {
-    "scam": {
-        "verdict": "scam",
-        "confidence": 88,
-        "reasoning": (
-            "ఈ సందేశంలో మోసానికి సంబంధించిన స్పష్టమైన సంకేతాలు ఉన్నాయి. "
-            "డబ్బు చెల్లించవద్దు, ఏ లింక్ పైనా క్లిక్ చేయవద్దు, ఎవరికీ "
-            "వ్యక్తిగత వివరాలు ఇవ్వవద్దు."
-        ),
-        "red_flags": [
-            "డబ్బు లేదా వ్యక్తిగత వివరాలు అడుగుతోంది",
-            "ఒత్తిడి లేదా తొందరపాటు భాష ఉంది",
-        ],
-        "advice": [
-            "ఎటువంటి డబ్బు చెల్లించవద్దు లేదా వివరాలు పంచుకోవద్దు.",
-            "మీ బ్యాంక్ కు లేదా పోలీసులకు (సైబర్ సెల్ / 1930) నివేదించండి.",
-        ],
-    },
-    "suspicious": {
-        "verdict": "suspicious",
-        "confidence": 55,
-        "reasoning": (
-            "ఈ సందేశంలో కొన్ని అనుమానాస్పద సంకేతాలు ఉన్నాయి. ఏదైనా చర్య "
-            "తీసుకునే ముందు అధికారిక మార్గం ద్వారా ధృవీకరించండి."
-        ),
-        "red_flags": [
-            "తెలియని లేదా ధృవీకరించని పంపినవారు",
-            "డబ్బు, OTP లేదా వ్యక్తిగత వివరాలు అడగవచ్చు",
-        ],
-        "advice": [
-            "అధికారిక చానల్ ద్వారా నిర్ధారించుకోండి.",
-            "OTP, PIN లేదా డబ్బు అడిగితే మోసంగానే పరిగణించండి.",
-        ],
-    },
-    "safe": {
-        "verdict": "safe",
-        "confidence": 70,
-        "reasoning": (
-            "ఈ సందేశంలో మోసానికి సంబంధించిన సంకేతాలు కనిపించలేదు. ఇది "
-            "సాధారణ రోజువారీ సందేశంలా ఉంది."
-        ),
-        "red_flags": [],
-        "advice": [
-            "ఎటువంటి చర్య అవసరం లేదు.",
-            "మీరు అడగని OTP గురించి ఉంటే దాన్ని ఎవరికీ ఇవ్వవద్దు.",
-        ],
-    },
+    "scam": "Do not reply or share anything; report it to your bank or the police (cyber cell / 1930).",
+    "suspicious": "Verify the message through an official channel before acting.",
+    "safe": "No action is needed; keep using official apps and websites.",
 }
 
 
@@ -549,7 +326,7 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
-def _coerce_verdict_dict(raw: dict, language: str) -> dict:
+def _coerce_verdict_dict(raw: dict) -> dict:
     """Validate/normalize an LLM-produced dict into the canonical schema."""
     verdict = str(raw.get("verdict", "suspicious")).strip().lower()
     if verdict not in VALID_VERDICTS:
@@ -577,33 +354,13 @@ def _coerce_verdict_dict(raw: dict, language: str) -> dict:
     }
 
 
-def _contains_telugu(text: str) -> bool:
-    """True if any character of `text` is in the Telugu Unicode block."""
-    return any(0x0C00 <= ord(ch) <= 0x0C7F for ch in text)
-
-
-def _non_telugu_fields(result: dict) -> list[str]:
-    """Fields that violate the Telugu language contract (empty lists pass)."""
-    missing: list[str] = []
-    if not _contains_telugu(result["reasoning"]):
-        missing.append("reasoning")
-    if result["red_flags"] and any(
-        not _contains_telugu(str(flag)) for flag in result["red_flags"]
-    ):
-        missing.append("red_flags")
-    if result["advice"] and any(
-        not _contains_telugu(str(step)) for step in result["advice"]
-    ):
-        missing.append("advice")
-    return missing
-
-
-def _drop_fragments(result: dict, language: str) -> dict:
+def _drop_fragments(result: dict) -> dict:
     """Drop stray fragments (< 10 chars) from red_flags/advice.
 
-    If filtering empties a list, replace it with one sensible bilingual
-    default phrase for the verdict category. A single word must never reach
-    the frontend as a red flag or advice item.
+    If filtering empties a list, replace it with one sensible default phrase
+    for the verdict category. A single word must never reach the frontend as
+    a red flag or advice item. Runs in English, BEFORE the deterministic
+    translation step.
     """
     for field in ("red_flags", "advice"):
         cleaned = [
@@ -613,34 +370,29 @@ def _drop_fragments(result: dict, language: str) -> dict:
         ]
         if not cleaned:
             defaults = _DEFAULT_FLAG if field == "red_flags" else _DEFAULT_ADVICE
-            cleaned = [defaults[language][result["verdict"]]]
+            cleaned = [defaults[result["verdict"]]]
         result[field] = cleaned
     return result
 
 
-def _groq_verdict(
-    message: str,
-    patterns: list[RetrievedPattern],
-    language: str,
-    insist_telugu: bool = False,
-) -> dict:
-    """Call Groq's llama-3.3-70b-versatile, strictly grounded in `patterns`."""
+def _groq_verdict(message: str, patterns: list[RetrievedPattern]) -> dict:
+    """Call Groq's openai/gpt-oss-120b, strictly grounded in `patterns`.
+
+    Always asks for English output — translation to Telugu happens later in
+    get_verdict, so the model is never asked to write Telugu itself.
+
+    Rate-limit handling: the free tier can return HTTP 429 under bursts. The
+    call is retried once after a short delay; if it still fails, the caller
+    falls back to the mock reasoner (the service never hard-fails).
+    """
     from groq import Groq  # imported lazily so the module works without the dep
 
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
     pattern_lines = "\n".join(f"- [{p.category}] {p.text}" for p in patterns)
-    language_label = "English" if language == "en" else "Telugu (తెలుగు)"
+    system_prompt = SYSTEM_TEMPLATE.format(pattern_lines=pattern_lines)
 
-    system_prompt = SYSTEM_TEMPLATE.format(
-        pattern_lines=pattern_lines, language_label=language_label
-    )
-    if insist_telugu:
-        system_prompt += (
-            "\nYour previous response was not in Telugu — respond only in Telugu this time."
-        )
-
-    response = client.chat.completions.create(
+    kwargs = dict(
         model=GROQ_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -649,8 +401,22 @@ def _groq_verdict(
         temperature=0.2,
         max_tokens=600,
     )
+
+    attempt = 0
+    while True:
+        try:
+            response = client.chat.completions.create(**kwargs)
+            break
+        except Exception as exc:
+            if attempt == 0 and getattr(exc, "status_code", None) == 429:
+                logger.warning("Groq rate limited (429); retrying after %.1fs.", _VERDICT_RETRY_DELAY_S)
+                time.sleep(_VERDICT_RETRY_DELAY_S)
+                attempt = 1
+                continue
+            raise
+
     content = response.choices[0].message.content or ""
-    return _coerce_verdict_dict(json.loads(_strip_code_fences(content)), language)
+    return _coerce_verdict_dict(json.loads(_strip_code_fences(content)))
 
 
 def _mock_score(message: str, patterns: list[RetrievedPattern]) -> tuple:
@@ -700,9 +466,7 @@ def _mock_score(message: str, patterns: list[RetrievedPattern]) -> tuple:
     return top, hits, score, verdict, confidence
 
 
-def _mock_reason_en(
-    message: str, hits: list[str], top: RetrievedPattern, verdict: str
-) -> str:
+def _mock_reason(message: str, hits: list[str], top: RetrievedPattern, verdict: str) -> str:
     """Specific, grounded English reasoning for the mock path.
 
     Names which urgency keywords actually matched and which pattern was the
@@ -723,31 +487,12 @@ def _mock_reason_en(
     return f"{match_line} {analogy} {_VERDICT_CAUTION_EN[verdict]}"
 
 
-def _mock_reason_te(
-    message: str, hits: list[str], top: RetrievedPattern, verdict: str
-) -> str:
-    """Specific, grounded Telugu reasoning for the mock path.
+def _mock_verdict(message: str, patterns: list[RetrievedPattern]) -> dict:
+    """Deterministic offline reasoner — no network, fully testable.
 
-    Same structure as the English variant but every sentence is Telugu; the
-    matched English keywords are quoted as-is (they are words from the user's
-    own message), never translated English sentences.
+    Always produces English output (the same language both paths generate
+    in); Telugu is produced by the translation step in get_verdict.
     """
-    label = _PATTERN_LABEL_TE.get(top.id, "మోసం")
-    noun = "మోసాల" if top.category == "scam" else ""
-    if hits:
-        words = ", ".join(f"'{h}'" for h in hits[:4])
-        match_line = (
-            f"ఈ సందేశంలో {words} వంటి ఒత్తిడి పదాలు ఉన్నాయి మరియు ఇది {label} "
-            f"{noun} నమూనాతో సరిపోతుంది."
-        )
-    else:
-        match_line = f"ఈ సందేశం {label} {noun} నమూనాతో సరిపోతుంది."
-    analogy = _PATTERN_ANALOGY_TE.get(top.id, _REASONING_TE[verdict])
-    return f"{match_line} {analogy} {_VERDICT_CAUTION_TE[verdict]}"
-
-
-def _mock_verdict_en(message: str, patterns: list[RetrievedPattern]) -> dict:
-    """English copy of the offline mock reasoner."""
     top, hits, _, verdict, confidence = _mock_score(message, patterns)
 
     flags: list[str] = []
@@ -761,50 +506,10 @@ def _mock_verdict_en(message: str, patterns: list[RetrievedPattern]) -> dict:
     return {
         "verdict": verdict,
         "confidence": confidence,
-        "reasoning": _mock_reason_en(message, hits, top, verdict),
+        "reasoning": _mock_reason(message, hits, top, verdict),
         "red_flags": flags,
         "advice": _ADVICE_EN[verdict],
     }
-
-
-def _mock_verdict_te(message: str, patterns: list[RetrievedPattern]) -> dict:
-    """Telugu copy of the offline mock reasoner.
-
-    Every returned string is a full Telugu sentence: reasoning references the
-    specific matched pattern and keywords, red_flags are mapped keywords to
-    Telugu flag sentences (deduplicated), and advice comes from the Telugu
-    copy table.
-    """
-    top, hits, _, verdict, confidence = _mock_score(message, patterns)
-
-    flags: list[str] = []
-    for kw in hits:
-        sentence = _FLAG_TE.get(kw) or "మోసపూరిత సూచన కనుగొనబడింది"
-        if sentence not in flags:
-            flags.append(sentence)
-        if len(flags) >= 5:
-            break
-
-    return {
-        "verdict": verdict,
-        "confidence": confidence,
-        "reasoning": _mock_reason_te(message, hits, top, verdict),
-        "red_flags": flags,
-        "advice": _ADVICE_TE[verdict],
-    }
-
-
-def _mock_verdict(message: str, patterns: list[RetrievedPattern], language: str) -> dict:
-    """Deterministic offline reasoner — no network, fully testable.
-
-    The language parameter is the FIRST thing branched on: everything returned
-    is selected from the language's own copy tables, so a Telugu request can
-    never receive English output (or retrieved pattern text, which is never
-    shown verbatim in any language).
-    """
-    if language == "te":
-        return _mock_verdict_te(message, patterns)
-    return _mock_verdict_en(message, patterns)
 
 
 def get_verdict(message: str, patterns: list[RetrievedPattern], language: str = "en") -> dict:
@@ -814,48 +519,46 @@ def get_verdict(message: str, patterns: list[RetrievedPattern], language: str = 
     reasoner (and also on any Groq/network error, so the service never
     hard-fails because of the LLM provider).
 
-    Language-conformance safeguard: for Telugu requests, reasoning, EVERY
-    red_flags item, and EVERY advice item must contain Telugu script. The
-    mock path is structurally Telugu; a violation in the real LLM path
-    triggers ONE retry with an even more explicit instruction, and any field
-    still failing is replaced with the hardcoded fully-Telugu template for
-    that verdict — English is never shown to a Telugu user.
+    Language handling: both paths generate ENGLISH only. For language == "te"
+    the final English strings are translated deterministically — reasoning
+    and every red_flags/advice item, one by one — as the last step before
+    returning. For "en" no translation happens. translate_text fails safe
+    (returns the English text unchanged) if the translation service is
+    unreachable, so the service never crashes because of translation.
 
     Fragment safeguard: red_flags/advice items shorter than 10 characters are
-    dropped; emptied lists get a bilingual default phrase for the verdict.
+    dropped BEFORE translation; emptied lists get a default phrase, which is
+    then translated along with everything else.
+
+    Rate-limit safeguard: the final English verdict (post fragment-filtering,
+    pre translation) is cached by (message, matched pattern ids). Scam texts
+    circulate verbatim, so repeats are answered from cache without hitting
+    the LLM — the main defence against free-tier 429s, on top of the one
+    retry inside _groq_verdict.
     """
-    result: dict = _mock_verdict(message, patterns, language)
+    cache_key = (message, tuple(p.id for p in patterns))
+    cached = _VERDICT_CACHE.get(cache_key)
+    if cached is None:
+        result: dict = _mock_verdict(message, patterns)
 
-    if os.environ.get("GROQ_API_KEY"):
-        try:
-            result = _groq_verdict(message, patterns, language)
-        except Exception as exc:  # network, quota, malformed JSON, ...
-            logger.warning("Groq verdict failed (%s); using mock reasoner.", exc)
-            result = _mock_verdict(message, patterns, language)
+        if os.environ.get("GROQ_API_KEY"):
+            try:
+                result = _groq_verdict(message, patterns)
+            except Exception as exc:  # network, quota, malformed JSON, ...
+                logger.warning("Groq verdict failed (%s); using mock reasoner.", exc)
+                result = _mock_verdict(message, patterns)
 
-        if language == "te":
-            missing = _non_telugu_fields(result)
-            if missing:
-                logger.warning(
-                    "Groq returned non-Telugu fields %s; retrying once with a "
-                    "stronger instruction.",
-                    missing,
-                )
-                try:
-                    result = _groq_verdict(message, patterns, language, insist_telugu=True)
-                except Exception as exc:
-                    logger.warning("Groq retry failed (%s); using mock reasoner.", exc)
-                    result = _mock_verdict(message, patterns, language)
-                missing = _non_telugu_fields(result)
-                if missing:
-                    logger.warning(
-                        "Groq still failed Telugu conformance on fields %s; "
-                        "replacing them with the hardcoded Telugu template.",
-                        missing,
-                    )
-                    fallback = _TELUGU_FALLBACK[result["verdict"]]
-                    for field in missing:
-                        result[field] = fallback[field]
+        result = _drop_fragments(result)
 
-    result = _drop_fragments(result, language)
+        if len(_VERDICT_CACHE) >= _VERDICT_CACHE_MAX:
+            _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)))
+        _VERDICT_CACHE[cache_key] = result
+    else:
+        result = dict(cached)
+
+    if language == "te":
+        result["reasoning"] = translate_text(result["reasoning"], "te")
+        result["red_flags"] = [translate_text(flag, "te") for flag in result["red_flags"]]
+        result["advice"] = [translate_text(step, "te") for step in result["advice"]]
+
     return result

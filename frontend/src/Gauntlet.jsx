@@ -182,12 +182,16 @@ export default function Gauntlet() {
   const [checking, setChecking] = useState(false)
   const [finished, setFinished] = useState(false)
 
-  // Always send whatever lang is CURRENTLY selected at /analyze call time,
-  // never a value captured in a stale closure.
+  // ---- single source of truth for language ---------------------------------
+  // `lang` state drives BOTH the /analyze request language (via langRef, used
+  // in makeGuess below) and every GAUNTLET_COPY[lang] label (via t) — there
+  // is exactly one language value in this component. langRef is a live
+  // mirror, re-synced after EVERY render, so no closure can read a stale
+  // language, and the displayed message text uses the same live `lang`.
   const langRef = useRef(lang)
   useEffect(() => {
     langRef.current = lang
-  }, [lang])
+  })
 
   const total = deck.length
   const item = deck[round]
