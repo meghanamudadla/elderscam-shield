@@ -30,6 +30,7 @@ const COPY = {
     mic: 'Speak the message',
     listening: 'Listening… speak now',
     micUnsupported: 'Voice input is not supported in this browser.',
+    confirmRecording: 'Use this text',
     uploadScreenshot: 'Upload a screenshot',
     readingScreenshot: 'Reading the screenshot…',
     ocrEmpty: "Couldn't find any text in that image — try a clearer screenshot.",
@@ -46,6 +47,7 @@ const COPY = {
     verdictScam: 'SCAM',
     verdictSuspicious: 'SUSPICIOUS',
     verdictSafe: 'SAFE',
+    verdictFraud: 'FRAUD',
     headlineScam: 'Likely a scam — be very careful.',
     headlineSuspicious: 'Looks suspicious — verify before acting.',
     headlineSafe: 'Looks safe — no red flags found.',
@@ -99,6 +101,7 @@ const COPY = {
     mic: 'సందేశం మాట్లాడండి',
     listening: 'వింటున్నాం… ఇప్పుడు మాట్లాడండి',
     micUnsupported: 'ఈ బ్రౌజర్ లో వాయిస్ ఇన్‌పుట్ సపోర్ట్ చేయదు.',
+    confirmRecording: 'ఈ టెక్స్ట్ ఉపయోగించండి',
     uploadScreenshot: 'స్క్రీన్‌షాట్ అప్‌లోడ్ చేయండి',
     readingScreenshot: 'స్క్రీన్‌షాట్ చదువుతున్నాం…',
     ocrEmpty: 'ఆ చిత్రంలో ఎటువంటి అక్షరాలు కనిపించలేదు — మరింత స్పష్టమైన స్క్రీన్‌షాట్ ప్రయత్నించండి.',
@@ -115,6 +118,7 @@ const COPY = {
     verdictScam: 'మోసం',
     verdictSuspicious: 'అనుమానం',
     verdictSafe: 'సురక్షితం',
+    verdictFraud: 'మోసం',
     headlineScam: 'ఇది మోసం అయ్యే అవకాశం ఉంది — చాలా జాగ్రత్తగా ఉండండి.',
     headlineSuspicious: 'అనుమానాస్పదంగా ఉంది — చర్య తీసుకునే ముందు ధృవీకరించండి.',
     headlineSafe: 'సురక్షితంగా కనిపిస్తోంది — ఎటువంటి ప్రమాదం లేదు.',
@@ -162,7 +166,11 @@ const VERDICT_STYLE = {
   safe: { color: COLORS.safe, glow: 'rgba(90, 168, 118, 0.16)' },
 }
 
-const pageStyles = PAGE_STYLES
+// Light surface for the message textarea only — it stands out from the dark
+// "lantern" panel. Nothing else in the app changes color.
+const INPUT_SURFACE = { bg: '#f7f5ef', text: '#1b2436', border: '#d9d4c7', placeholder: '#8f8b80' }
+
+const pageStyles = `${PAGE_STYLES}\n  .msg-input::placeholder { color: ${INPUT_SURFACE.placeholder}; }`
 
 export default function App() {
   const [lang, setLang] = useState('en')
@@ -174,7 +182,7 @@ export default function App() {
   const [resultError, setResultError] = useState('')
 
   const [status, setStatus] = useState('checking')
-  const [listening, setListening] = useState(false)
+  const [recorderState, setRecorderState] = useState('idle') // "idle" | "recording" | "paused"
   const [micNote, setMicNote] = useState('')
   const [listenNote, setListenNote] = useState('')
   const [ocrLoading, setOcrLoading] = useState(false)
@@ -192,6 +200,8 @@ export default function App() {
   const [summary, setSummary] = useState({ categories: [], total: 0 })
 
   const recognitionRef = useRef(null)
+  const stagedRef = useRef('') // accumulated transcript across pause/resume
+  const pauseRequestedRef = useRef(false) // .stop() was a user pause, not a session end
   const fileInputRef = useRef(null)
   const analyzedTextRef = useRef('')
 
@@ -325,32 +335,73 @@ export default function App() {
     [message, loading, t, clearAudio]
   )
 
-  // ---- voice input ----------------------------------------------------------
-  const startListening = useCallback(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SR) {
-      setMicNote(t.micUnsupported)
-      return
-    }
-    const rec = new SR()
-    rec.lang = lang === 'te' ? 'te-IN' : 'en-IN'
-    rec.continuous = false
-    rec.interimResults = false
-    rec.onresult = (event) => {
-      const transcript = event.results[0][0].transcript
-      setMessage(transcript)
-      runAnalysis(transcript) // fill the box AND analyze immediately
-    }
-    rec.onerror = () => setMicNote(t.micUnsupported)
-    rec.onend = () => {
-      setListening(false)
+  // ---- voice input (3-state recorder: idle -> recording -> paused) ----------
+  // One recognition instance per segment. Pause calls .stop() and keeps the
+  // staged transcript; resume starts a NEW instance that APPENDS to the staged
+  // transcript; Upload finalizes the session WITHOUT triggering /analyze — the
+  // user still presses the main Check button, matching the OCR review flow.
+  const beginRecognition = useCallback(
+    (fresh) => {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+      if (!SR) {
+        setMicNote(t.micUnsupported)
+        return
+      }
+      if (fresh) stagedRef.current = ''
+      const rec = new SR()
+      rec.lang = lang === 'te' ? 'te-IN' : 'en-IN'
+      rec.continuous = false
+      rec.interimResults = false
+      rec.onresult = (event) => {
+        const transcript = event.results[0][0].transcript
+        const next = [stagedRef.current, transcript].filter(Boolean).join(' ')
+        stagedRef.current = next
+        setMessage(next) // live into the textarea; user reviews before checking
+      }
+      rec.onerror = () => setMicNote(t.micUnsupported)
+      rec.onend = () => {
+        if (pauseRequestedRef.current) {
+          pauseRequestedRef.current = false
+          setRecorderState('paused')
+        } else {
+          setRecorderState('idle')
+        }
+        setMicNote('')
+      }
+      recognitionRef.current = rec
       setMicNote('')
+      setRecorderState('recording')
+      rec.start()
+    },
+    [lang, t]
+  )
+
+  const startListening = useCallback(() => beginRecognition(true), [beginRecognition])
+
+  const resumeRecorder = useCallback(() => beginRecognition(false), [beginRecognition])
+
+  const pauseRecorder = useCallback(() => {
+    const rec = recognitionRef.current
+    if (!rec) return
+    pauseRequestedRef.current = true
+    rec.stop() // keeps stagedRef.current — resumed later by a new instance
+  }, [])
+
+  const uploadRecorder = useCallback(() => {
+    const rec = recognitionRef.current
+    if (rec) {
+      try {
+        rec.stop()
+      } catch {
+        // already stopped (session was paused) — nothing to do
+      }
     }
-    recognitionRef.current = rec
+    recognitionRef.current = null
+    pauseRequestedRef.current = false
+    setMessage(stagedRef.current) // staged is already live in the box; end cleanly
+    setRecorderState('idle')
     setMicNote('')
-    setListening(true)
-    rec.start()
-  }, [lang, t, runAnalysis])
+  }, [])
 
   // ---- screenshot OCR (fully client-side, tesseract.js) ---------------------
   const handleImageFile = async (file) => {
@@ -477,13 +528,16 @@ export default function App() {
 
   // ---- derived -----------------------------------------------------------------
   const vs = result ? VERDICT_STYLE[result.verdict] : null
-  const verdictLabel = result
-    ? result.verdict === 'scam'
-      ? t.verdictScam
-      : result.verdict === 'suspicious'
-        ? t.verdictSuspicious
-        : t.verdictSafe
+  // Two-outcome display mapping (display-only): safe -> SAFE (green),
+  // suspicious AND scam -> FRAUD (red). The backend verdict, the confidence
+  // badge, and the reasoning/red-flags/advice below keep the full 3-value
+  // nuance — only this big final-outcome label is binarized.
+  const displayVerdict = result
+    ? result.verdict === 'safe'
+      ? t.verdictSafe
+      : t.verdictFraud
     : ''
+  const displayVerdictColor = result && result.verdict !== 'safe' ? COLORS.scam : COLORS.safe
   const statusColor = status === 'online' ? COLORS.safe : status === 'offline' ? COLORS.scam : COLORS.suspicious
 
   const cardStyle = {
@@ -491,6 +545,17 @@ export default function App() {
     border: `1px solid ${COLORS.border}`,
     borderRadius: 20,
     padding: '26px 28px',
+  }
+
+  const toolBtnStyle = {
+    background: 'transparent',
+    border: `1.5px solid ${COLORS.border}`,
+    color: COLORS.text,
+    borderRadius: 12,
+    padding: '16px 20px',
+    fontSize: 15,
+    fontWeight: 600,
+    cursor: 'pointer',
   }
 
   return (
@@ -529,7 +594,7 @@ export default function App() {
           >
             {t.title}
           </h1>
-          <p style={{ margin: '4px 0 0', color: COLORS.muted, fontSize: 15 }}>{t.subtitle}</p>
+          <p style={{ margin: '4px 0 0', color: COLORS.muted, fontFamily: FONT.serif, fontSize: 30 }}>{t.subtitle}</p>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -608,13 +673,14 @@ export default function App() {
             }}
             placeholder={t.inputPlaceholder}
             rows={5}
+            className="msg-input"
             style={{
               width: '100%',
               resize: 'vertical',
-              background: COLORS.bg,
-              border: `1px solid ${COLORS.border}`,
+              background: INPUT_SURFACE.bg,
+              border: `1px solid ${INPUT_SURFACE.border}`,
               borderRadius: 14,
-              color: COLORS.text,
+              color: INPUT_SURFACE.text,
               fontFamily: FONT.sans,
               fontSize: 18,
               lineHeight: 1.5,
@@ -629,40 +695,33 @@ export default function App() {
             </p>
           )}
 
-          <div style={{ display: 'flex', gap: 12, marginTop: 16, flexWrap: 'wrap' }}>
-            <button
-              onClick={startListening}
-              className={`mic-btn${listening ? ' listening' : ''}`}
-              disabled={listening}
-              title={t.mic}
-              style={{
-                background: 'transparent',
-                border: `1.5px solid ${COLORS.border}`,
-                color: COLORS.text,
-                borderRadius: 12,
-                padding: '16px 20px',
-                fontSize: 15,
-                fontWeight: 600,
-                cursor: 'pointer',
-              }}
-            >
-              {listening ? t.listening : t.mic}
-            </button>
+          <div style={{ display: 'flex', gap: 12, marginTop: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+            {recorderState === 'idle' ? (
+              <button onClick={startListening} className="mic-btn" title={t.mic} style={toolBtnStyle}>
+                🎤 {t.mic}
+              </button>
+            ) : (
+              <>
+                {recorderState === 'recording' ? (
+                  <button onClick={pauseRecorder} className="mic-btn listening" title={t.pause} style={toolBtnStyle}>
+                    ⏸ {t.pause}
+                  </button>
+                ) : (
+                  <button onClick={resumeRecorder} className="mic-btn" title={t.resume} style={toolBtnStyle}>
+                    ▶ {t.resume}
+                  </button>
+                )}
+                <button onClick={uploadRecorder} className="mic-btn" title={t.confirmRecording} style={toolBtnStyle}>
+                  ✓ {t.confirmRecording}
+                </button>
+              </>
+            )}
             <button
               onClick={() => fileInputRef.current?.click()}
               className="mic-btn"
               disabled={ocrLoading}
               title={t.uploadScreenshot}
-              style={{
-                background: 'transparent',
-                border: `1.5px solid ${COLORS.border}`,
-                color: COLORS.text,
-                borderRadius: 12,
-                padding: '16px 20px',
-                fontSize: 15,
-                fontWeight: 600,
-                cursor: ocrLoading ? 'not-allowed' : 'pointer',
-              }}
+              style={{ ...toolBtnStyle, cursor: ocrLoading ? 'not-allowed' : 'pointer' }}
             >
               📷 {t.uploadScreenshot}
             </button>
@@ -686,6 +745,9 @@ export default function App() {
               {loading ? t.analyzing : t.analyze}
             </button>
           </div>
+          {recorderState === 'recording' && (
+            <p style={{ color: COLORS.accent, fontSize: 14, margin: '12px 0 0' }}>{t.listening}</p>
+          )}
           {micNote && (
             <p style={{ color: COLORS.suspicious, fontSize: 14, margin: '12px 0 0' }}>{micNote}</p>
           )}
@@ -769,10 +831,10 @@ export default function App() {
                     fontFamily: FONT.mono,
                     fontSize: 13,
                     letterSpacing: 2,
-                    color: vs.color,
+                    color: displayVerdictColor,
                   }}
                 >
-                  {verdictLabel}
+                  {displayVerdict}
                 </p>
                 <h2
                   style={{
