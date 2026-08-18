@@ -348,6 +348,7 @@ export default function App() {
         return
       }
       if (fresh) stagedRef.current = ''
+      pauseRequestedRef.current = false // a new session owns the controls from here on
       const rec = new SR()
       rec.lang = lang === 'te' ? 'te-IN' : 'en-IN'
       rec.continuous = false
@@ -358,8 +359,15 @@ export default function App() {
         stagedRef.current = next
         setMessage(next) // live into the textarea; user reviews before checking
       }
-      rec.onerror = () => setMicNote(t.micUnsupported)
+      rec.onerror = (event) => {
+        if (event?.error === 'aborted') return // caused by our own stop() — not a failure
+        setMicNote(t.micUnsupported)
+      }
       rec.onend = () => {
+        // Ignore endings from superseded instances: if the user already
+        // paused->resumed (or uploaded) a NEW session, the old instance's
+        // onend must not clobber the current recorder state.
+        if (recognitionRef.current !== rec) return
         if (pauseRequestedRef.current) {
           pauseRequestedRef.current = false
           setRecorderState('paused')
@@ -371,7 +379,14 @@ export default function App() {
       recognitionRef.current = rec
       setMicNote('')
       setRecorderState('recording')
-      rec.start()
+      try {
+        rec.start()
+      } catch {
+        // e.g. permission denied — don't leave the UI stuck in "recording"
+        recognitionRef.current = null
+        setRecorderState('idle')
+        setMicNote(t.micUnsupported)
+      }
     },
     [lang, t]
   )
@@ -384,7 +399,17 @@ export default function App() {
     const rec = recognitionRef.current
     if (!rec) return
     pauseRequestedRef.current = true
-    rec.stop() // keeps stagedRef.current — resumed later by a new instance
+    let stopped = true
+    try {
+      rec.stop() // keeps stagedRef.current — resumed later by a new instance
+    } catch {
+      stopped = false // recognition had already ended — onend already reset state
+    }
+    // Transition immediately so the UI never shows "recording" while nothing
+    // is listening, even if onend is delayed or unreliable in some browsers.
+    if (stopped && recognitionRef.current === rec) {
+      setRecorderState('paused')
+    }
   }, [])
 
   const uploadRecorder = useCallback(() => {
@@ -538,6 +563,14 @@ export default function App() {
       : t.verdictFraud
     : ''
   const displayVerdictColor = result && result.verdict !== 'safe' ? COLORS.scam : COLORS.safe
+  // The circular badge is binarized too — no number, just the color-coded
+  // status: safe -> green, suspicious AND scam -> red. Reuses the existing
+  // VERDICT_STYLE entries so colors/glows stay consistent with the tokens.
+  const badgeDisplay = result
+    ? result.verdict === 'safe'
+      ? VERDICT_STYLE.safe
+      : VERDICT_STYLE.scam
+    : null
   const statusColor = status === 'online' ? COLORS.safe : status === 'offline' ? COLORS.scam : COLORS.suspicious
 
   const cardStyle = {
@@ -799,15 +832,17 @@ export default function App() {
         {result && vs && (
           <section style={{ ...cardStyle, borderColor: vs.color }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
-              {/* lantern badge */}
+              {/* lantern badge — color-coded status only, no numeric confidence.
+                  (Confidence still comes back in the API payload; we just don't
+                  display it. Below the badge the full explanation still shows.) */}
               <div
                 style={{
-                  '--glow-color': vs.glow,
+                  '--glow-color': badgeDisplay.glow,
                   width: 150,
                   height: 150,
                   borderRadius: '50%',
-                  background: `radial-gradient(circle at 35% 30%, ${vs.glow}, transparent 70%)`,
-                  border: `3px solid ${vs.color}`,
+                  background: `radial-gradient(circle at 35% 30%, ${badgeDisplay.glow}, transparent 70%)`,
+                  border: `3px solid ${badgeDisplay.color}`,
                   display: 'flex',
                   flexDirection: 'column',
                   alignItems: 'center',
@@ -816,11 +851,8 @@ export default function App() {
                   flexShrink: 0,
                 }}
               >
-                <span style={{ fontFamily: FONT.mono, fontSize: 38, fontWeight: 500, color: vs.color }}>
-                  {result.confidence}%
-                </span>
-                <span style={{ fontFamily: FONT.mono, fontSize: 10, color: COLORS.muted, letterSpacing: 1 }}>
-                  {t.confidence}
+                <span style={{ fontFamily: FONT.serif, fontSize: 56, fontWeight: 700, lineHeight: 1, color: badgeDisplay.color }}>
+                  {result.verdict === 'safe' ? '✓' : '!'}
                 </span>
               </div>
 
