@@ -16,16 +16,16 @@ export default function Root() {
   return (
     <div>
       <style>{`
-        .root-tab:hover:not(.active) { border-color: ${COLORS.accent}; color: ${COLORS.accent}; }
+        .root-tab:hover:not(.active) { border-color: ${COLORS.lantern}; color: ${COLORS.lantern}; }
       `}</style>
       <div
         style={{
           position: 'sticky',
           top: 0,
           zIndex: 10,
-          background: 'rgba(20, 27, 43, 0.92)',
+          background: 'rgba(250, 248, 243, 0.94)',
           backdropFilter: 'blur(6px)',
-          borderBottom: `1px solid ${COLORS.border}`,
+          borderBottom: `1px solid ${COLORS.hairline}`,
           padding: '12px 20px',
         }}
       >
@@ -44,8 +44,8 @@ export default function Root() {
             style={{
               display: 'flex',
               gap: 6,
-              background: COLORS.card,
-              border: `1px solid ${COLORS.border}`,
+              background: COLORS.bgPanel,
+              border: `1px solid ${COLORS.hairline}`,
               borderRadius: 999,
               padding: 4,
               width: 'fit-content',
@@ -57,9 +57,9 @@ export default function Root() {
                 onClick={() => setTab(key)}
                 className={`root-tab${tab === key ? ' active' : ''}`}
                 style={{
-                  border: `1px solid ${tab === key ? COLORS.accent : COLORS.border}`,
-                  background: tab === key ? COLORS.accent : 'transparent',
-                  color: tab === key ? COLORS.bg : COLORS.text,
+                  border: `1px solid ${tab === key ? COLORS.lantern : COLORS.hairline}`,
+                  background: tab === key ? COLORS.lantern : 'transparent',
+                  color: COLORS.text,
                   fontFamily: FONT.sans,
                   fontWeight: 600,
                   fontSize: 16,
@@ -76,8 +76,8 @@ export default function Root() {
             style={{
               display: 'flex',
               gap: 6,
-              background: COLORS.card,
-              border: `1px solid ${COLORS.border}`,
+              background: COLORS.bgPanel,
+              border: `1px solid ${COLORS.hairline}`,
               borderRadius: 999,
               padding: 4,
               width: 'fit-content',
@@ -89,9 +89,9 @@ export default function Root() {
                 onClick={() => setLang(code)}
                 className={`root-tab${lang === code ? ' active' : ''}`}
                 style={{
-                  border: `1px solid ${lang === code ? COLORS.accent : COLORS.border}`,
-                  background: lang === code ? COLORS.accent : 'transparent',
-                  color: lang === code ? COLORS.bg : COLORS.text,
+                  border: `1px solid ${lang === code ? COLORS.lantern : COLORS.hairline}`,
+                  background: lang === code ? COLORS.lantern : 'transparent',
+                  color: COLORS.text,
                   fontFamily: FONT.sans,
                   fontWeight: 600,
                   fontSize: 15,

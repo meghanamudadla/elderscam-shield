@@ -17,7 +17,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 const COPY = {
   en: {
     title: 'Scam Shield',
-    subtitle: 'Check any message before you trust it — your lantern in the dark of phishing.',
+    subtitle: 'Verify the message below',
     langEn: 'EN',
     langTe: 'తె',
     statusChecking: 'checking…',
@@ -88,7 +88,7 @@ const COPY = {
   },
   te: {
     title: 'Scam Shield',
-    subtitle: 'నమ్మకం పెట్టే ముందు ప్రతి సందేశాన్ని తనిఖీ చేయండి — ఫిషింగ్ చీకటిలో మీ దీపం.',
+    subtitle: 'కింది సందేశాన్ని తనిఖీ చేయండి.',
     langEn: 'EN',
     langTe: 'తె',
     statusChecking: 'తనిఖీ…',
@@ -160,15 +160,21 @@ const COPY = {
 }
 
 // Verdict visual config, keyed by the backend's verdict string.
+// `soft` is the light-theme tint used for the badge fill + breathing ring.
 const VERDICT_STYLE = {
-  scam: { color: COLORS.scam, glow: 'rgba(211, 86, 79, 0.16)' },
-  suspicious: { color: COLORS.suspicious, glow: 'rgba(219, 165, 60, 0.16)' },
-  safe: { color: COLORS.safe, glow: 'rgba(90, 168, 118, 0.16)' },
+  scam: { color: COLORS.danger, soft: COLORS.dangerSoft },
+  suspicious: { color: COLORS.caution, soft: COLORS.cautionSoft },
+  safe: { color: COLORS.safe, soft: COLORS.safeSoft },
 }
 
-// Light surface for the message textarea only — it stands out from the dark
-// "lantern" panel. Nothing else in the app changes color.
-const INPUT_SURFACE = { bg: '#f7f5ef', text: '#1b2436', border: '#d9d4c7', placeholder: '#8f8b80' }
+// Light surface for the message textarea — sits on the raised gray so it
+// stays visually distinct from the pure-white panels around it.
+const INPUT_SURFACE = {
+  bg: COLORS.bgPanelRaised,
+  text: COLORS.text,
+  border: COLORS.hairline,
+  placeholder: 'rgba(27, 36, 54, 0.45)',
+}
 
 const pageStyles = `${PAGE_STYLES}\n  .msg-input::placeholder { color: ${INPUT_SURFACE.placeholder}; }`
 
@@ -562,27 +568,28 @@ export default function App() {
       ? t.verdictSafe
       : t.verdictFraud
     : ''
-  const displayVerdictColor = result && result.verdict !== 'safe' ? COLORS.scam : COLORS.safe
+  const displayVerdictColor = result && result.verdict !== 'safe' ? COLORS.danger : COLORS.safe
   // The circular badge is binarized too — no number, just the color-coded
   // status: safe -> green, suspicious AND scam -> red. Reuses the existing
-  // VERDICT_STYLE entries so colors/glows stay consistent with the tokens.
+  // VERDICT_STYLE entries so colors/rings stay consistent with the tokens.
   const badgeDisplay = result
     ? result.verdict === 'safe'
       ? VERDICT_STYLE.safe
       : VERDICT_STYLE.scam
     : null
-  const statusColor = status === 'online' ? COLORS.safe : status === 'offline' ? COLORS.scam : COLORS.suspicious
+  const statusColor = status === 'online' ? COLORS.safe : status === 'offline' ? COLORS.danger : COLORS.caution
 
   const cardStyle = {
-    background: COLORS.card,
-    border: `1px solid ${COLORS.border}`,
+    background: COLORS.bgPanel,
+    border: `1px solid ${COLORS.hairline}`,
     borderRadius: 20,
     padding: '26px 28px',
+    boxShadow: COLORS.cardShadow,
   }
 
   const toolBtnStyle = {
-    background: 'transparent',
-    border: `1.5px solid ${COLORS.border}`,
+    background: COLORS.bgPanelRaised,
+    border: `1.5px solid ${COLORS.hairline}`,
     color: COLORS.text,
     borderRadius: 12,
     padding: '16px 20px',
@@ -627,7 +634,7 @@ export default function App() {
           >
             {t.title}
           </h1>
-          <p style={{ margin: '4px 0 0', color: COLORS.muted, fontFamily: FONT.serif, fontSize: 30 }}>{t.subtitle}</p>
+          <p style={{ margin: '4px 0 0', color: COLORS.textMuted, fontFamily: FONT.serif, fontSize: 30 }}>{t.subtitle}</p>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -635,8 +642,8 @@ export default function App() {
             style={{
               display: 'flex',
               gap: 6,
-              background: COLORS.card,
-              border: `1px solid ${COLORS.border}`,
+              background: COLORS.bgPanel,
+              border: `1px solid ${COLORS.hairline}`,
               borderRadius: 999,
               padding: 4,
             }}
@@ -647,7 +654,7 @@ export default function App() {
                 onClick={() => setLang(code)}
                 className={`toggle-btn${lang === code ? ' active' : ''}`}
                 style={{
-                  border: `1px solid ${COLORS.border}`,
+                  border: `1px solid ${COLORS.hairline}`,
                   background: 'transparent',
                   color: COLORS.text,
                   fontFamily: FONT.sans,
@@ -673,7 +680,7 @@ export default function App() {
                 boxShadow: `0 0 8px ${statusColor}`,
               }}
             />
-            <span style={{ fontFamily: FONT.mono, fontSize: 11, color: COLORS.muted }}>
+            <span style={{ fontFamily: FONT.mono, fontSize: 11, color: COLORS.textMuted }}>
               {status === 'online' ? t.statusOnline : status === 'offline' ? t.statusOffline : t.statusChecking}
             </span>
           </div>
@@ -723,7 +730,7 @@ export default function App() {
           />
 
           {justOcred && (
-            <p style={{ color: COLORS.accent, fontSize: 14, margin: '12px 0 0' }}>
+            <p style={{ color: COLORS.lanternDark, fontSize: 14, margin: '12px 0 0' }}>
               {t.reviewOcrText}
             </p>
           )}
@@ -765,8 +772,8 @@ export default function App() {
               style={{
                 flex: 1,
                 minWidth: 220,
-                background: COLORS.accent,
-                color: COLORS.bg,
+                background: COLORS.lantern,
+                color: COLORS.text,
                 border: 'none',
                 borderRadius: 12,
                 padding: '16px 24px',
@@ -779,21 +786,21 @@ export default function App() {
             </button>
           </div>
           {recorderState === 'recording' && (
-            <p style={{ color: COLORS.accent, fontSize: 14, margin: '12px 0 0' }}>{t.listening}</p>
+            <p style={{ color: COLORS.lanternDark, fontSize: 14, margin: '12px 0 0' }}>{t.listening}</p>
           )}
           {micNote && (
-            <p style={{ color: COLORS.suspicious, fontSize: 14, margin: '12px 0 0' }}>{micNote}</p>
+            <p style={{ color: COLORS.danger, fontSize: 14, margin: '12px 0 0' }}>{micNote}</p>
           )}
           {ocrLoading && (
-            <p style={{ color: COLORS.accent, fontSize: 14, margin: '12px 0 0' }}>
+            <p style={{ color: COLORS.lanternDark, fontSize: 14, margin: '12px 0 0' }}>
               {t.readingScreenshot}
             </p>
           )}
           {ocrNote && (
-            <p style={{ color: COLORS.suspicious, fontSize: 14, margin: '12px 0 0' }}>{ocrNote}</p>
+            <p style={{ color: COLORS.danger, fontSize: 14, margin: '12px 0 0' }}>{ocrNote}</p>
           )}
 
-          <p style={{ margin: '22px 0 10px', color: COLORS.muted, fontSize: 13, fontFamily: FONT.mono }}>
+          <p style={{ margin: '22px 0 10px', color: COLORS.textMuted, fontSize: 13, fontFamily: FONT.mono }}>
             {t.examplesLabel}
           </p>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -807,7 +814,7 @@ export default function App() {
                 }}
                 style={{
                   background: 'transparent',
-                  border: `1px solid ${COLORS.border}`,
+                  border: `1px solid ${COLORS.hairline}`,
                   color: COLORS.text,
                   borderRadius: 999,
                   padding: '10px 16px',
@@ -824,8 +831,8 @@ export default function App() {
 
         {/* ============================== result ============================== */}
         {resultError && (
-          <section style={{ ...cardStyle, borderColor: COLORS.scam }}>
-            <p style={{ margin: 0, color: COLORS.scam, fontSize: 16 }}>{resultError}</p>
+          <section style={{ ...cardStyle, borderColor: COLORS.danger }}>
+            <p style={{ margin: 0, color: COLORS.danger, fontSize: 16 }}>{resultError}</p>
           </section>
         )}
 
@@ -834,14 +841,17 @@ export default function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
               {/* lantern badge — color-coded status only, no numeric confidence.
                   (Confidence still comes back in the API payload; we just don't
-                  display it. Below the badge the full explanation still shows.) */}
+                  display it. Below the badge the full explanation still shows.)
+                  Light-theme treatment: soft tinted fill, solid colored border,
+                  and a breathing soft ring (pulseGlow) instead of the old
+                  glow-on-dark radial halo. */}
               <div
                 style={{
-                  '--glow-color': badgeDisplay.glow,
+                  '--glow-color': badgeDisplay.soft,
                   width: 150,
                   height: 150,
                   borderRadius: '50%',
-                  background: `radial-gradient(circle at 35% 30%, ${badgeDisplay.glow}, transparent 70%)`,
+                  background: badgeDisplay.soft,
                   border: `3px solid ${badgeDisplay.color}`,
                   display: 'flex',
                   flexDirection: 'column',
@@ -903,7 +913,7 @@ export default function App() {
             )}
 
             <div style={{ marginTop: 18 }}>
-              <h3 style={{ fontFamily: FONT.mono, fontSize: 13, letterSpacing: 1, color: COLORS.muted, margin: '0 0 10px' }}>
+              <h3 style={{ fontFamily: FONT.mono, fontSize: 13, letterSpacing: 1, color: COLORS.textMuted, margin: '0 0 10px' }}>
                 {t.adviceLabel}
               </h3>
               <ul style={{ margin: 0, paddingLeft: 20, color: COLORS.text, fontSize: 16, lineHeight: 1.7 }}>
@@ -943,7 +953,7 @@ export default function App() {
                   style={{
                     background: flagged ? 'transparent' : vs.color,
                     border: `1.5px solid ${vs.color}`,
-                    color: flagged ? vs.color : COLORS.bg,
+                    color: flagged ? vs.color : COLORS.text,
                     borderRadius: 12,
                     padding: '14px 20px',
                     fontSize: 15,
@@ -956,10 +966,10 @@ export default function App() {
               )}
             </div>
             {flagNote && !flagged && (
-              <p style={{ color: COLORS.suspicious, fontSize: 14, margin: '12px 0 0' }}>{flagNote}</p>
+              <p style={{ color: COLORS.danger, fontSize: 14, margin: '12px 0 0' }}>{flagNote}</p>
             )}
             {listenNote && (
-              <p style={{ color: COLORS.suspicious, fontSize: 14, margin: '12px 0 0' }}>{listenNote}</p>
+              <p style={{ color: COLORS.danger, fontSize: 14, margin: '12px 0 0' }}>{listenNote}</p>
             )}
           </section>
         )}
@@ -971,7 +981,7 @@ export default function App() {
           </h2>
           <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
             {reports.length === 0 ? (
-              <p style={{ margin: 0, color: COLORS.muted, fontSize: 15 }}>{t.communityEmpty}</p>
+              <p style={{ margin: 0, color: COLORS.textMuted, fontSize: 15 }}>{t.communityEmpty}</p>
             ) : (
               reports.map((r, i) => {
                 const rc = VERDICT_STYLE[r.verdict] || VERDICT_STYLE.suspicious
@@ -982,8 +992,8 @@ export default function App() {
                       display: 'flex',
                       alignItems: 'center',
                       gap: 12,
-                      background: COLORS.bg,
-                      border: `1px solid ${COLORS.border}`,
+                      background: COLORS.bgPanelRaised,
+                      border: `1px solid ${COLORS.hairline}`,
                       borderRadius: 12,
                       padding: '12px 14px',
                     }}
@@ -1025,7 +1035,7 @@ export default function App() {
           </h2>
           <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
             {summary.total === 0 ? (
-              <p style={{ margin: 0, color: COLORS.muted, fontSize: 15 }}>{t.trendsEmpty}</p>
+              <p style={{ margin: 0, color: COLORS.textMuted, fontSize: 15 }}>{t.trendsEmpty}</p>
             ) : (
               summary.categories.map((cat) => {
                 const label = t.categoryNames[cat.category] || cat.category
@@ -1048,8 +1058,8 @@ export default function App() {
                       style={{
                         flex: 1,
                         height: 22,
-                        background: COLORS.bg,
-                        border: `1px solid ${COLORS.border}`,
+                        background: COLORS.bgPanelRaised,
+                        border: `1px solid ${COLORS.hairline}`,
                         borderRadius: 999,
                         overflow: 'hidden',
                       }}
@@ -1058,9 +1068,9 @@ export default function App() {
                         style={{
                           height: '100%',
                           width: `${widthPct}%`,
-                          background: COLORS.accent,
+                          background: COLORS.lantern,
                           borderRadius: 999,
-                          boxShadow: `0 0 10px rgba(232, 163, 61, 0.45)`,
+                          boxShadow: `0 0 10px rgba(217, 144, 31, 0.35)`,
                         }}
                       />
                     </div>
@@ -1070,7 +1080,7 @@ export default function App() {
                         flexShrink: 0,
                         fontFamily: FONT.mono,
                         fontSize: 13,
-                        color: COLORS.accent,
+                        color: COLORS.lanternDark,
                       }}
                     >
                       {cat.count}

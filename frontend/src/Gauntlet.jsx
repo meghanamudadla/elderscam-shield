@@ -150,8 +150,8 @@ const GAUNTLET_SET = [
 ]
 
 const VERDICT_COLOR = {
-  scam: COLORS.scam,
-  suspicious: COLORS.suspicious,
+  scam: COLORS.danger,
+  suspicious: COLORS.caution,
   safe: COLORS.safe,
 }
 
@@ -240,14 +240,15 @@ export default function Gauntlet() {
   }
 
   const cardStyle = {
-    background: COLORS.card,
-    border: `1px solid ${COLORS.border}`,
+    background: COLORS.bgPanel,
+    border: `1px solid ${COLORS.hairline}`,
     borderRadius: 20,
     padding: '26px 28px',
+    boxShadow: COLORS.cardShadow,
   }
 
   const pillStyle = {
-    border: `1px solid ${COLORS.border}`,
+    border: `1px solid ${COLORS.hairline}`,
     background: 'transparent',
     color: COLORS.text,
     fontFamily: FONT.sans,
@@ -264,7 +265,18 @@ export default function Gauntlet() {
     const encourage =
       pct >= 0.75 ? t.encourageHigh : pct >= 0.5 ? t.encourageMid : t.encourageLow
     return (
-      <main style={{ maxWidth: 860, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 22 }}>
+      <main
+        style={{
+          minHeight: '100vh',
+          background: COLORS.bg,
+          padding: '28px 20px 60px',
+          maxWidth: 860,
+          margin: '0 auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 22,
+        }}
+      >
         <style>{PAGE_STYLES}</style>
         <section style={cardStyle}>
           <h2 style={{ margin: 0, fontFamily: FONT.serif, fontSize: 28, fontWeight: 600 }}>
@@ -273,7 +285,7 @@ export default function Gauntlet() {
           <p style={{ margin: '10px 0 0', fontSize: 20, color: COLORS.text }}>
             {t.doneScore} {score} {t.doneScoreOf}
           </p>
-          <p style={{ margin: '14px 0 0', fontSize: 17, lineHeight: 1.6, color: COLORS.muted }}>
+          <p style={{ margin: '14px 0 0', fontSize: 17, lineHeight: 1.6, color: COLORS.textMuted }}>
             {encourage}
           </p>
           <button
@@ -281,8 +293,8 @@ export default function Gauntlet() {
             className="btn-primary"
             style={{
               marginTop: 24,
-              background: COLORS.accent,
-              color: COLORS.bg,
+              background: COLORS.lantern,
+              color: COLORS.text,
               border: 'none',
               borderRadius: 12,
               padding: '16px 28px',
@@ -299,10 +311,21 @@ export default function Gauntlet() {
   }
 
   const match = guess === item.expectedVerdict
-  const guessColor = match ? COLORS.safe : COLORS.scam
+  const guessColor = match ? COLORS.safe : COLORS.danger
 
   return (
-    <main style={{ maxWidth: 860, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 22 }}>
+    <main
+      style={{
+        minHeight: '100vh',
+        background: COLORS.bg,
+        padding: '28px 20px 60px',
+        maxWidth: 860,
+        margin: '0 auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 22,
+      }}
+    >
       <style>{PAGE_STYLES}</style>
       {/* header row: title + score + language toggle */}
       <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
@@ -310,15 +333,15 @@ export default function Gauntlet() {
           <h1 style={{ margin: 0, fontFamily: FONT.serif, fontSize: 28, fontWeight: 700 }}>
             {t.title}
           </h1>
-          <p style={{ margin: '4px 0 0', color: COLORS.muted, fontSize: 14 }}>{t.subtitle}</p>
+          <p style={{ margin: '4px 0 0', color: COLORS.textMuted, fontSize: 14 }}>{t.subtitle}</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div
             style={{
               display: 'flex',
               gap: 6,
-              background: COLORS.card,
-              border: `1px solid ${COLORS.border}`,
+              background: COLORS.bgPanel,
+              border: `1px solid ${COLORS.hairline}`,
               borderRadius: 999,
               padding: 4,
             }}
@@ -330,7 +353,7 @@ export default function Gauntlet() {
                 style={{
                   ...pillStyle,
                   ...(lang === code
-                    ? { background: COLORS.accent, color: COLORS.bg, borderColor: COLORS.accent }
+                    ? { background: COLORS.lantern, color: COLORS.text, borderColor: COLORS.lantern }
                     : {}),
                 }}
               >
@@ -342,9 +365,9 @@ export default function Gauntlet() {
             style={{
               fontFamily: FONT.mono,
               fontSize: 14,
-              color: COLORS.accent,
-              background: COLORS.card,
-              border: `1px solid ${COLORS.border}`,
+              color: COLORS.lanternDark,
+              background: COLORS.bgPanel,
+              border: `1px solid ${COLORS.hairline}`,
               borderRadius: 999,
               padding: '8px 14px',
             }}
@@ -356,15 +379,15 @@ export default function Gauntlet() {
 
       {/* round card */}
       <section style={cardStyle}>
-        <p style={{ margin: 0, fontFamily: FONT.mono, fontSize: 12, letterSpacing: 1, color: COLORS.muted }}>
+        <p style={{ margin: 0, fontFamily: FONT.mono, fontSize: 12, letterSpacing: 1, color: COLORS.textMuted }}>
           {t.round} {round + 1} {t.of} {total}
         </p>
 
         <div
           style={{
             marginTop: 16,
-            background: COLORS.bg,
-            border: `1px solid ${COLORS.border}`,
+            background: COLORS.bgPanelRaised,
+            border: `1px solid ${COLORS.hairline}`,
             borderRadius: 14,
             padding: 18,
             fontSize: 19,
@@ -375,7 +398,7 @@ export default function Gauntlet() {
           {item.text[lang]}
         </div>
 
-        <p style={{ margin: '18px 0 12px', fontSize: 16, color: COLORS.muted }}>{t.guessPrompt}</p>
+        <p style={{ margin: '18px 0 12px', fontSize: 16, color: COLORS.textMuted }}>{t.guessPrompt}</p>
 
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           {(['safe', 'suspicious', 'scam']).map((value) => (
@@ -388,7 +411,7 @@ export default function Gauntlet() {
                 flex: 1,
                 minWidth: 140,
                 background: VERDICT_COLOR[value],
-                color: COLORS.bg,
+                color: COLORS.text,
                 border: 'none',
                 borderRadius: 12,
                 padding: '16px 20px',
@@ -419,12 +442,12 @@ export default function Gauntlet() {
             </p>
 
             {analyzeError ? (
-              <p style={{ margin: '14px 0 0', color: COLORS.suspicious, fontSize: 15 }}>
+              <p style={{ margin: '14px 0 0', color: COLORS.danger, fontSize: 15 }}>
                 {t.analyzeError}
               </p>
             ) : analysis ? (
-              <div style={{ marginTop: 14, background: COLORS.bg, border: `1px solid ${COLORS.border}`, borderRadius: 14, padding: 16 }}>
-                <p style={{ margin: 0, fontFamily: FONT.mono, fontSize: 12, letterSpacing: 1, color: COLORS.muted }}>
+              <div style={{ marginTop: 14, background: COLORS.bgPanelRaised, border: `1px solid ${COLORS.hairline}`, borderRadius: 14, padding: 16 }}>
+                <p style={{ margin: 0, fontFamily: FONT.mono, fontSize: 12, letterSpacing: 1, color: COLORS.textMuted }}>
                   {t.whatShieldSays} — {t[VERDICT_LABEL_KEY[analysis.verdict]]} ({analysis.confidence}%)
                 </p>
                 <p style={{ margin: '12px 0 0', fontSize: 16, lineHeight: 1.6, color: COLORS.text }}>
@@ -432,7 +455,7 @@ export default function Gauntlet() {
                 </p>
                 {analysis.red_flags.length > 0 && (
                   <div style={{ marginTop: 14 }}>
-                    <p style={{ margin: 0, fontFamily: FONT.mono, fontSize: 12, letterSpacing: 1, color: COLORS.suspicious }}>
+                    <p style={{ margin: 0, fontFamily: FONT.mono, fontSize: 12, letterSpacing: 1, color: COLORS.danger }}>
                       {t.redFlagsLabel}
                     </p>
                     <ul style={{ margin: '8px 0 0', paddingLeft: 20, fontSize: 15, lineHeight: 1.7, color: COLORS.text }}>
@@ -444,7 +467,7 @@ export default function Gauntlet() {
                 )}
                 {analysis.advice.length > 0 && (
                   <div style={{ marginTop: 14 }}>
-                    <p style={{ margin: 0, fontFamily: FONT.mono, fontSize: 12, letterSpacing: 1, color: COLORS.muted }}>
+                    <p style={{ margin: 0, fontFamily: FONT.mono, fontSize: 12, letterSpacing: 1, color: COLORS.textMuted }}>
                       {t.adviceLabel}
                     </p>
                     <ul style={{ margin: '8px 0 0', paddingLeft: 20, fontSize: 15, lineHeight: 1.7, color: COLORS.text }}>
@@ -462,8 +485,8 @@ export default function Gauntlet() {
               className="btn-primary"
               style={{
                 marginTop: 18,
-                background: COLORS.accent,
-                color: COLORS.bg,
+                background: COLORS.lantern,
+                color: COLORS.text,
                 border: 'none',
                 borderRadius: 12,
                 padding: '16px 28px',
