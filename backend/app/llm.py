@@ -41,7 +41,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .retrieval import RetrievedPattern
-from .translate import translate_text
+from .translate import TranslationError, translate_verdict_payload
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,10 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 _VERDICT_CACHE: dict[tuple, dict] = {}
 _VERDICT_CACHE_MAX = 128
 _VERDICT_RETRY_DELAY_S = 1.5
+
+# Post-translation verdict cache (Telugu etc.) — see get_verdict.
+_TRANSLATED_CACHE: dict[tuple, dict] = {}
+_TRANSLATED_CACHE_MAX = 128
 
 VALID_VERDICTS = ("scam", "suspicious", "safe")
 
@@ -557,8 +561,34 @@ def get_verdict(message: str, patterns: list[RetrievedPattern], language: str = 
         result = dict(cached)
 
     if language == "te":
-        result["reasoning"] = translate_text(result["reasoning"], "te")
-        result["red_flags"] = [translate_text(flag, "te") for flag in result["red_flags"]]
-        result["advice"] = [translate_text(step, "te") for step in result["advice"]]
+        # Second-level cache keyed by (message, pattern ids, language): stores
+        # the POST-translation verdict so repeat Telugu analyses cost zero
+        # translator requests (the English _VERDICT_CACHE above stays
+        # language-neutral because translation depends on the requested lang).
+        translated_key = (message, tuple(p.id for p in patterns), "te")
+        translated_cached = _TRANSLATED_CACHE.get(translated_key)
+        if translated_cached is not None:
+            return dict(translated_cached)
+
+        try:
+            fields = {
+                "reasoning": result["reasoning"],
+                "red_flags": result["red_flags"],
+                "advice": result["advice"],
+            }
+            done = translate_verdict_payload(fields, "te", result["verdict"])
+            result.update(done)
+            if len(_TRANSLATED_CACHE) >= _TRANSLATED_CACHE_MAX:
+                _TRANSLATED_CACHE.pop(next(iter(_TRANSLATED_CACHE)))
+            _TRANSLATED_CACHE[translated_key] = dict(result)
+        except TranslationError as exc:
+            # Every translation backend is down. Degrade gracefully: keep the
+            # English content so the pipeline never crashes, but make the
+            # breakage loud in the server console.
+            logger.warning(
+                "Translation unavailable for a Telugu request; returning English "
+                "content. Detail: %s",
+                exc,
+            )
 
     return result

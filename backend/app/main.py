@@ -14,11 +14,51 @@ from pydantic import BaseModel, Field
 
 from .langgraph_pipeline import run_pipeline
 from .schemas import AnalyzeRequest, ReportIn, VerdictResponse
+from .translate import TranslationError, translate_text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Scam Shield", version="1.0.0")
+
+
+def _ascii_safe(text: str) -> str:
+    """Make a string safe for Windows consoles that cannot print Unicode."""
+    return text.encode("ascii", "replace").decode("ascii")
+
+
+@app.on_event("startup")
+def translation_self_test() -> None:
+    """Run a quick translation sanity check on server start.
+
+    Logs a clear success/failure message so operators immediately know
+    whether live translation is working in this environment.
+    """
+    test_text = "This is a scam message asking for money."
+    try:
+        translated = translate_text(test_text, "te")
+        telugu_chars = sum(1 for ch in translated if 0x0C00 <= ord(ch) <= 0x0C7F)
+        if telugu_chars > 0:
+            logger.info(
+                "Translation self-test PASSED: %r -> %s (%d Telugu chars)",
+                test_text,
+                _ascii_safe(translated[:80]),
+                telugu_chars,
+            )
+        else:
+            logger.warning(
+                "Translation self-test returned NO Telugu characters: %r",
+                _ascii_safe(translated[:120]),
+            )
+    except TranslationError as exc:
+        logger.error(
+            "Translation self-test FAILED - all backends unreachable. Telugu "
+            "requests will show English until this is fixed (check GEMINI_API_KEY "
+            "and network access). Detail: %s",
+            exc,
+        )
+    except Exception as exc:  # noqa: BLE001 — never block startup on the probe
+        logger.error("Translation self-test ERROR: %s", exc)
 
 # Dev-only: allow any origin so the Vite dev server (localhost:5173) can call
 # us. Tighten to an explicit origin allowlist before real deployment.

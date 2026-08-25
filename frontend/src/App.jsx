@@ -37,13 +37,6 @@ const COPY = {
     ocrBadFile: 'Please upload an image file.',
     ocrFailed: 'Something went wrong reading that image. Please try again.',
     reviewOcrText: 'Extracted from your screenshot — please check it looks right before checking.',
-    examplesLabel: 'Or try an example:',
-    examples: [
-      { label: 'KYC alert', text: 'Your bank account will be blocked in 24 hours! Your KYC has expired. Click this link immediately to update your KYC details and avoid penalty.' },
-      { label: 'Digital arrest', text: 'This is CBI officer Sharma. A parcel with drugs was found in your name. You are under digital arrest. Stay on this call, do not hang up, do not tell anyone. Pay the fine immediately or you will be arrested.' },
-      { label: 'Relative in trouble', text: 'Hello father, this is your son. I had an accident and I am in the hospital. Send 50,000 rupees to this account immediately. Do not tell anyone at home.' },
-      { label: 'Routine bill', text: 'Your mobile bill of 299 rupees has been generated. Please pay the amount before the due date through the official app to avoid disconnection.' },
-    ],
     verdictScam: 'SCAM',
     verdictSuspicious: 'SUSPICIOUS',
     verdictSafe: 'SAFE',
@@ -55,6 +48,8 @@ const COPY = {
     reasoningLabel: 'Why we think so',
     redFlagsLabel: 'Red flags we found',
     adviceLabel: 'What to do next',
+    reasonButton: 'Reason',
+    hideReasonButton: 'Hide reason',
     listen: 'Listen',
     pause: 'Pause',
     resume: 'Resume',
@@ -108,14 +103,7 @@ const COPY = {
     ocrBadFile: 'దయచేసి చిత్రం (ఇమేజ్) ఫైల్ అప్‌లోడ్ చేయండి.',
     ocrFailed: 'ఆ చిత్రాన్ని చదవడంలో ఏదో సమస్య జరిగింది. మళ్ళీ ప్రయత్నించండి.',
     reviewOcrText: 'మీ స్క్రీన్‌షాట్ నుండి సంగ్రహించబడింది — తనిఖీ చేసే ముందు అది సరిగ్గా ఉందని నిర్ధారించుకోండి.',
-    examplesLabel: 'లేదా ఉదాహరణ ప్రయత్నించండి:',
-    examples: [
-      { label: 'KYC హెచ్చరిక', text: 'మీ బ్యాంక్ ఖాతా 24 గంటల్లో బ్లాక్ అవుతుంది! మీ KYC గడువు ముగిసింది. వెంటనే ఈ లింక్ పై క్లిక్ చేసి మీ KYC నవీకరించండి.' },
-      { label: 'డిజిటల్ అరెస్ట్', text: 'ఇది CBI అధికారి శర్మ. మీ పేరు మీద డ్రగ్స్ పార్సెల్ దొరికింది. మీరు డిజిటల్ అరెస్ట్ లో ఉన్నారు. ఫోన్ పెట్టవద్దు, ఎవరికీ చెప్పవద్దు. వెంటనే జరిమానా చెల్లించండి లేదా అరెస్ట్ అవుతారు.' },
-      { label: 'బంధువు ఇబ్బంది', text: 'నాన్నా, ఇది మీ కొడుకు. నాకు యాక్సిడెంట్ అయింది, ఆసుపత్రిలో ఉన్నాను. వెంటనే 50,000 రూపాయలు ఈ ఖాతాకు పంపండి. ఇంట్లో ఎవరికీ చెప్పకండి.' },
-      { label: 'సాధారణ బిల్లు', text: 'మీ మొబైల్ బిల్లు 299 రూపాయలు జనరేట్ అయింది. డిస్కనెక్షన్ నివారించడానికి గడువు తేదీలోపు అధికారిక యాప్ ద్వారా చెల్లించండి.' },
-    ],
-    verdictScam: 'మోసం',
+verdictScam: 'మోసం',
     verdictSuspicious: 'అనుమానం',
     verdictSafe: 'సురక్షితం',
     verdictFraud: 'మోసం',
@@ -126,6 +114,8 @@ const COPY = {
     reasoningLabel: 'మేము ఎందుకు అలా అనుకుంటున్నాము',
     redFlagsLabel: 'మేము గుర్తించిన హెచ్చరికలు',
     adviceLabel: 'తర్వాత ఏమి చేయాలి',
+    reasonButton: 'కారణం',
+    hideReasonButton: 'కారణం దాల్చండి',
     listen: 'వినండి',
     pause: 'విరామం',
     resume: 'కొనసాగించండి',
@@ -204,6 +194,7 @@ export default function App() {
   const [flagNote, setFlagNote] = useState('')
   const [reports, setReports] = useState([])
   const [summary, setSummary] = useState({ categories: [], total: 0 })
+  const [showReason, setShowReason] = useState(false)
 
   const recognitionRef = useRef(null)
   const stagedRef = useRef('') // accumulated transcript across pause/resume
@@ -322,6 +313,7 @@ export default function App() {
       setFlagNote('')
       setFlagged(false)
       setJustOcred(false)
+      setShowReason(false)
       analyzedTextRef.current = text
       try {
         const res = await fetch(`${API_BASE}/analyze`, {
@@ -799,34 +791,6 @@ export default function App() {
           {ocrNote && (
             <p style={{ color: COLORS.danger, fontSize: 14, margin: '12px 0 0' }}>{ocrNote}</p>
           )}
-
-          <p style={{ margin: '22px 0 10px', color: COLORS.textMuted, fontSize: 13, fontFamily: FONT.mono }}>
-            {t.examplesLabel}
-          </p>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            {t.examples.map((ex) => (
-              <button
-                key={ex.label}
-                className="chip"
-                onClick={() => {
-                  setMessage(ex.text)
-                  runAnalysis(ex.text)
-                }}
-                style={{
-                  background: 'transparent',
-                  border: `1px solid ${COLORS.hairline}`,
-                  color: COLORS.text,
-                  borderRadius: 999,
-                  padding: '10px 16px',
-                  fontSize: 14,
-                  cursor: 'pointer',
-                  transition: 'all .15s ease',
-                }}
-              >
-                {ex.label}
-              </button>
-            ))}
-          </div>
         </section>
 
         {/* ============================== result ============================== */}
@@ -893,34 +857,70 @@ export default function App() {
                       ? t.headlineSuspicious
                       : t.headlineSafe}
                 </h2>
-                <p style={{ margin: 0, fontSize: 17, lineHeight: 1.6, color: COLORS.text }}>
-                  {result.reasoning}
-                </p>
+                {!showReason ? (
+                  <button
+                    onClick={() => setShowReason(true)}
+                    style={{
+                      background: 'transparent',
+                      border: `1.5px solid ${vs.color}`,
+                      color: vs.color,
+                      borderRadius: 12,
+                      padding: '10px 18px',
+                      fontSize: 15,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      fontFamily: FONT.sans,
+                    }}
+                  >
+                    {t.reasonButton}
+                  </button>
+                ) : (
+                  <>
+                    <p style={{ margin: '12px 0 0', fontSize: 17, lineHeight: 1.6, color: COLORS.text }}>
+                      {result.reasoning}
+                    </p>
+                    {result.red_flags.length > 0 && (
+                      <div style={{ marginTop: 22 }}>
+                        <h3 style={{ fontFamily: FONT.mono, fontSize: 13, letterSpacing: 1, color: vs.color, margin: '0 0 10px' }}>
+                          {t.redFlagsLabel}
+                        </h3>
+                        <ul style={{ margin: 0, paddingLeft: 20, color: COLORS.text, fontSize: 16, lineHeight: 1.7 }}>
+                          {result.red_flags.map((flag, i) => (
+                            <li key={i}>{flag}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    <div style={{ marginTop: 18 }}>
+                      <h3 style={{ fontFamily: FONT.mono, fontSize: 13, letterSpacing: 1, color: COLORS.textMuted, margin: '0 0 10px' }}>
+                        {t.adviceLabel}
+                      </h3>
+                      <ul style={{ margin: 0, paddingLeft: 20, color: COLORS.text, fontSize: 16, lineHeight: 1.7 }}>
+                        {result.advice.map((item, i) => (
+                          <li key={i}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <button
+                      onClick={() => setShowReason(false)}
+                      style={{
+                        background: 'transparent',
+                        border: `1.5px solid ${vs.color}`,
+                        color: vs.color,
+                        borderRadius: 12,
+                        padding: '10px 18px',
+                        fontSize: 15,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        fontFamily: FONT.sans,
+                        marginTop: 16,
+                      }}
+                    >
+                      {t.hideReasonButton}
+                    </button>
+                  </>
+                )}
               </div>
-            </div>
-
-            {result.red_flags.length > 0 && (
-              <div style={{ marginTop: 22 }}>
-                <h3 style={{ fontFamily: FONT.mono, fontSize: 13, letterSpacing: 1, color: vs.color, margin: '0 0 10px' }}>
-                  {t.redFlagsLabel}
-                </h3>
-                <ul style={{ margin: 0, paddingLeft: 20, color: COLORS.text, fontSize: 16, lineHeight: 1.7 }}>
-                  {result.red_flags.map((flag, i) => (
-                    <li key={i}>{flag}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <div style={{ marginTop: 18 }}>
-              <h3 style={{ fontFamily: FONT.mono, fontSize: 13, letterSpacing: 1, color: COLORS.textMuted, margin: '0 0 10px' }}>
-                {t.adviceLabel}
-              </h3>
-              <ul style={{ margin: 0, paddingLeft: 20, color: COLORS.text, fontSize: 16, lineHeight: 1.7 }}>
-                {result.advice.map((item, i) => (
-                  <li key={i}>{item}</li>
-                ))}
-              </ul>
             </div>
 
             <div style={{ display: 'flex', gap: 12, marginTop: 24, flexWrap: 'wrap' }}>
