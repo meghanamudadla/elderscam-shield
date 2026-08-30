@@ -32,6 +32,7 @@ Grounding contract (both paths):
 import json
 import logging
 import os
+import re
 import time
 
 from dotenv import load_dotenv
@@ -76,6 +77,8 @@ Retrieved patterns:
 
 Reply in English, unconditionally — the requested display language is handled by a separate deterministic translation step after you, so never translate or transliterate your output yourself.
 
+If the message text contains generic app security assurances or unrelated UI text (e.g. 'this is secure', 'end-to-end encrypted', delivery/read status), disregard those specific phrases when forming your verdict — reason only about the actual communicated content.
+
 Base your confidence score on how many concrete red flags you found in this specific message — more distinct red flags and stronger keyword/pattern matches should mean higher confidence, weak or single-signal matches should mean lower confidence. Do not default to a round number out of habit.
 Return ONLY raw JSON (no markdown, no fences, no commentary) with exactly these keys:
 {{"verdict": "scam|suspicious|safe", "confidence": <integer 0-100>, "reasoning": "<short explanation referencing the matched pattern>", "red_flags": ["..."], "advice": ["..."]}}"""
@@ -91,7 +94,12 @@ SCAM_KEYWORDS = [
     "aadhaar", "subsidy", "scheme", "job", "salary", "training", "warrant",
     "digital arrest", "delivery", "courier", "tax", "pan", "money laundering",
     "wallet", "reward", "free", "processing",
+    "credited", "withdraw", "proceed to", "before 9pm", "claim",
 ]
+
+# Same-day deadline pattern: "before 9PM", "before 9pm", "before 9 PM", etc.
+# Used alongside literal keyword hits as an extra urgency signal in _mock_score.
+_DEADLINE_RE = re.compile(r"before\s+\d{1,2}\s*(am|pm)\b", re.IGNORECASE)
 
 # Hidden/zero-width Unicode characters that can be smuggled into a message to
 # evade filters. Presence is treated as a suspicious signal in the mock
@@ -168,6 +176,12 @@ _PATTERN_ANALOGY_EN = {
         "office at once, asking you to move your money 'to safety' — officials "
         "never ask you to transfer money to a 'settlement account'."
     ),
+    "fake_credit_withdrawal": (
+        "This is like a stranger slipping a fake receipt into your pocket that "
+        "says you were already paid, then rushing you to tap a link before 9PM "
+        "to collect it — real money never needs you to click a random link to "
+        "claim or withdraw it."
+    ),
     "routine-bill": (
         "This is like a familiar postman dropping off a routine letter you "
         "were already expecting — a regular bill with no panic, no prize, and "
@@ -229,6 +243,7 @@ _PATTERN_LABEL_EN = {
     "job-advance-fee": "job advance fee",
     "digital-arrest": "digital arrest",
     "vishing-bank-tax-official": "bank/tax official impersonation",
+    "fake_credit_withdrawal": "fake credit withdrawal",
     "routine-bill": "routine bill",
     "user-triggered-otp": "user-triggered OTP",
     "known-contact-routine": "known contact",
@@ -301,6 +316,12 @@ _FLAG_EN = {
     "reward": "The message promises a reward.",
     "free": "The message offers something free.",
     "processing": "The message asks for a processing fee.",
+    "credited": "The message claims money was credited to your account.",
+    "withdraw": "The message urges you to withdraw money via a link.",
+    "proceed to": "The message tells you to 'proceed' via a link before a deadline.",
+    "before 9pm": "The message pressures you with a same-day deadline.",
+    "claim": "The message urges you to claim money via a link.",
+    "before deadline": "The message pressures you with a same-day deadline.",
 }
 
 # English default phrases per verdict, used when fragment-filtering empties a
@@ -447,6 +468,11 @@ def _mock_score(message: str, patterns: list[RetrievedPattern]) -> tuple:
     top = patterns[0]
     lowered = message.lower()
     hits = [kw for kw in SCAM_KEYWORDS if kw in lowered]
+    # Regex-based deadline detection: "before 9PM", "before 10 AM", etc.
+    # Counts as an extra urgency signal even if the literal "before 9pm" phrase
+    # wasn't matched (e.g. "before 10am"). Maps to pseudo-keyword "before deadline".
+    if _DEADLINE_RE.search(message) and "before deadline" not in hits:
+        hits.append("before deadline")
     score = top.score
 
     if top.category == "scam":

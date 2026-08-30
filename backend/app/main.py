@@ -3,11 +3,13 @@
 Run:  uvicorn app.main:app --reload   (from backend/)
 """
 
+import base64
 import datetime as dt
 import io
 import logging
+import os
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -159,3 +161,115 @@ def reports_summary() -> dict:
         reverse=True,
     )
     return {"categories": categories, "total": len(REPORTS)}
+
+
+# ---------------------------------------------------------------------------
+# Vision-based message extraction from a screenshot (primary path).
+#
+# OCR (Tesseract) only recognizes pixel patterns, so it cannot tell a chat
+# bubble apart from a fraud-warning banner or status-bar chrome, and it keeps
+# polluting the extracted text with app UI noise. A vision-capable LLM
+# understands layout and context, so it extracts ONLY the real message.
+#
+# This endpoint is meant to be tried FIRST by the frontend; if it fails (no
+# API key, no network, or any API error) it returns a clear non-OK error so
+# the frontend can fall back to the existing client-side Tesseract pipeline.
+# ---------------------------------------------------------------------------
+
+# Vision model: Google Gemini (multimodal). The Groq account this app runs on
+# has no vision-capable model, so vision extraction uses Gemini's REST API
+# (via the requests lib, already a dependency — no new package needed). The
+# main reasoning step in llm.py uses openai/gpt-oss-120b and is untouched.
+VISION_MODEL = "gemini-2.5-flash"
+
+VISION_SYSTEM_PROMPT = (
+    "This is a screenshot of a messaging or caller-ID app. Extract ONLY the "
+    "actual message text that a person sent or received — the real "
+    "SMS/WhatsApp/chat content. Ignore and do NOT include: security notices, "
+    "fraud warnings, encryption banners, delivery/read receipts, timestamps, "
+    "status bar icons, transaction summary cards, contact names, or any app "
+    "interface chrome. Return ONLY the raw message text, exactly as written, "
+    "with no commentary, no quotation marks, no explanation of what you excluded."
+)
+
+VISION_API_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+
+
+@app.post("/extract-message-from-image")
+async def extract_message_from_image(file: UploadFile = File(...)) -> dict:
+    """Extract just the actual message text from a screenshot via a vision LLM.
+
+    Uses Google Gemini (multimodal). Returns {"text": "..."} on success. On ANY
+    failure (missing API key, network error, API error, or an unreadable image)
+    it raises a 503 with a clear detail, so the caller can fall back to the
+    offline OCR pipeline instead of failing silently.
+    """
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Please upload an image file.")
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Vision extraction is unavailable (no GEMINI_API_KEY configured on "
+                "the server). The app will fall back to on-device OCR."
+            ),
+        )
+
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded image was empty.")
+
+    b64 = base64.b64encode(raw_bytes).decode("ascii")
+    mime = file.content_type or "image/png"
+
+    try:
+        import requests  # already a dependency; imported lazily
+
+        payload = {
+            "systemInstruction": {"parts": [{"text": VISION_SYSTEM_PROMPT}]},
+            "contents": [
+                {
+                    "parts": [
+                        {"text": "Extract only the message text from this screenshot."},
+                        {"inline_data": {"mime_type": mime, "data": b64}},
+                    ]
+                }
+            ],
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024},
+        }
+        resp = requests.post(
+            VISION_API_URL.format(model=VISION_MODEL),
+            params={"key": api_key},
+            json=payload,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # Gemini returns text in candidates[0].content.parts[].text; some replies
+        # spread it across multiple parts, so concatenate defensively.
+        parts = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+        text = "".join(p.get("text", "") for p in parts).strip()
+        if not text:
+            # Surface API-level blocking (e.g. safety filters) rather than fail silently.
+            if "error" in data:
+                raise RuntimeError(data["error"])
+            raise RuntimeError("Gemini returned no extractable text")
+    except Exception as exc:  # noqa: BLE001 — any vision failure → 503 fallback
+        logger.warning("Vision extraction failed (%s); frontend will use OCR.", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Vision extraction failed (network or API error). The app will "
+                "fall back to on-device OCR."
+            ),
+        ) from exc
+
+    return {"text": text}

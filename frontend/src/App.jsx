@@ -37,6 +37,8 @@ const COPY = {
     ocrBadFile: 'Please upload an image file.',
     ocrFailed: 'Something went wrong reading that image. Please try again.',
     reviewOcrText: 'Extracted from your screenshot — please check it looks right before checking.',
+    ocrChars: 'characters extracted',
+    cropTip: 'For best results, crop the screenshot to just the message before uploading.',
     verdictScam: 'SCAM',
     verdictSuspicious: 'SUSPICIOUS',
     verdictSafe: 'SAFE',
@@ -74,6 +76,8 @@ const COPY = {
       'job-advance-fee': 'Job advance fee',
       'digital-arrest': 'Digital arrest',
       'vishing-bank-tax-official': 'Bank/tax vishing',
+      'fake_credit_withdrawal': 'Fake credit withdrawal',
+      'fake-credit-withdrawal': 'Fake credit withdrawal',
       'routine-bill': 'Routine bill',
       'user-triggered-otp': 'User-triggered OTP',
       'known-contact-routine': 'Known contact',
@@ -103,6 +107,8 @@ const COPY = {
     ocrBadFile: 'దయచేసి చిత్రం (ఇమేజ్) ఫైల్ అప్‌లోడ్ చేయండి.',
     ocrFailed: 'ఆ చిత్రాన్ని చదవడంలో ఏదో సమస్య జరిగింది. మళ్ళీ ప్రయత్నించండి.',
     reviewOcrText: 'మీ స్క్రీన్‌షాట్ నుండి సంగ్రహించబడింది — తనిఖీ చేసే ముందు అది సరిగ్గా ఉందని నిర్ధారించుకోండి.',
+    ocrChars: 'అక్షరాలు సంగ్రహించబడ్డాయి',
+    cropTip: 'ఉత్తమ ఫలితాల కోసం, దయచేసి స్క్రీన్‌షాట్‌ను సందేశం వరకే కత్తిరించి అప్‌లోడ్ చేయండి.',
 verdictScam: 'మోసం',
     verdictSuspicious: 'అనుమానం',
     verdictSafe: 'సురక్షితం',
@@ -140,6 +146,8 @@ verdictScam: 'మోసం',
       'job-advance-fee': 'ఉద్యోగ అడ్వాన్స్ ఫీజు',
       'digital-arrest': 'డిజిటల్ అరెస్ట్',
       'vishing-bank-tax-official': 'బ్యాంక్/పన్ను విషింగ్',
+      'fake_credit_withdrawal': 'నకిలీ క్రెడిట్ విత్‌డ్రాయల్',
+      'fake-credit-withdrawal': 'నకిలీ క్రెడిట్ విత్‌డ్రాయల్',
       'routine-bill': 'సాధారణ బిల్లు',
       'user-triggered-otp': 'యూజర్ OTP',
       'known-contact-routine': 'తెలిసిన వ్యక్తి',
@@ -426,7 +434,133 @@ export default function App() {
     setMicNote('')
   }, [])
 
+  // ---- UI noise stripping (Continuation 16) — general-purpose, not app-specific
+  // Strips common non-message boilerplate (Truecaller banners, WhatsApp encrypted
+  // notices, timestamps, status bar) after OCR; conservative to avoid stripping
+  // real scam content (amounts, links, "before 9PM").
+  const UI_NOISE_PATTERNS = [
+    // Truecaller / caller-ID app chrome
+    /you reported this sender as fraud[.\s\S]*?outside the app\.?/gi,
+    /is 100% secure\.?\s*truecaller never uses this information\.?/gi,
+    /everything is processed and stored on your phone\.?/gi,
+    /this contact is blocked[.\s\S]*?communicate with them again\.?/gi,
+    /unblock/gi,
+    // WhatsApp chrome
+    /messages and calls are end-to-end encrypted[.\s\S]*?(read them|share them)\.?/gi,
+    /tap to (learn more|call|video call)/gi,
+    /\b(delivered|read|online|typing\.\.\.)\b/gi,
+    /last seen [^\n]*/gi,
+    // Generic messaging UI chrome
+    /\btoday\b/gi,
+    /\byesterday\b/gi,
+    /\bsms\s*[•·]\s*\d{1,2}:\d{2}\s*(am|pm)?/gi,
+    /\b\d{1,2}:\d{2}\s*(am|pm)?\b/gi, // bare timestamps, only after more specific patterns above
+    // Status bar noise
+    /\b(volte|lte|4g|5g|wifi)\b/gi,
+    // Transaction card label only (amounts are real content)
+    /^\s*transaction\s*$/gim,
+  ]
+
+  const stripUiNoise = (text) => {
+    let cleaned = text
+    for (const pattern of UI_NOISE_PATTERNS) {
+      cleaned = cleaned.replace(pattern, ' ')
+    }
+    cleaned = cleaned.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim()
+    return cleaned
+  }
+
+  // Continuation 15: contrast-boost preprocessing for low-contrast light-gray bubbles
+  const preprocessImageToBlob = async (file) => {
+    const img = new Image()
+    const url = URL.createObjectURL(file)
+    try {
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve()
+        img.onerror = () => reject(new Error('image load failed'))
+        img.src = url
+      })
+      const SCALE = 1.75
+      const w = Math.round(img.width * SCALE)
+      const h = Math.round(img.height * SCALE)
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('canvas 2d unavailable')
+      ctx.drawImage(img, 0, 0, w, h)
+      const imgData = ctx.getImageData(0, 0, w, h)
+      const data = imgData.data
+      // histogram for contrast stretch
+      const hist = new Array(256).fill(0)
+      for (let i = 0; i < data.length; i += 4) {
+        const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2])
+        hist[gray]++
+      }
+      const total = w * h
+      let lo = 0
+      let cum = 0
+      for (let i = 0; i < 256; i++) {
+        cum += hist[i]
+        if (cum / total >= 0.1) { lo = i; break }
+      }
+      let hi = 255
+      cum = 0
+      for (let i = 255; i >= 0; i--) {
+        cum += hist[i]
+        if (cum / total >= 0.1) { hi = i; break }
+      }
+      if (hi - lo >= 30) {
+        const range = hi - lo
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2])
+          const stretched = Math.max(0, Math.min(255, Math.round(((gray - lo) / range) * 255)))
+          data[i] = stretched
+          data[i + 1] = stretched
+          data[i + 2] = stretched
+        }
+        ctx.putImageData(imgData, 0, 0)
+      } else {
+        // not enough contrast range — still convert to grayscale for Tesseract
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2])
+          data[i] = gray
+          data[i + 1] = gray
+          data[i + 2] = gray
+        }
+        ctx.putImageData(imgData, 0, 0)
+      }
+      const blob = await new Promise((res, rej) => {
+        canvas.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), file.type || 'image/png', 0.92)
+      })
+      return blob
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+  }
+
+  // ---- vision-based extraction (PRIMARY) ------------------------------------
+  // A vision-capable LLM understands screenshot layout and context, so it can
+  // pull out ONLY the real message and drop fraud banners / status bar / app
+  // chrome — something OCR (pixel patterns only) can never do reliably. This
+  // is tried first; on any failure the caller falls back to Tesseract OCR.
+  const extractViaVision = useCallback(async (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch(`${API_BASE}/extract-message-from-image`, {
+      method: 'POST',
+      body: form,
+    })
+    if (!res.ok) throw new Error(String(res.status))
+    const json = await res.json()
+    return (json.text || '').trim()
+  }, [])
+
   // ---- screenshot OCR (fully client-side, tesseract.js) ---------------------
+  // Fix A: Tesseract's default data.text ordering can jumble disconnected blocks
+  // (chat bubble, Truecaller banner, Smart SMS notice). We reconstruct text
+  // ourselves from word bounding boxes, sorted top->bottom then left->right,
+  // and use PSM 11 (sparse text) which is best for multiple disconnected blocks.
   const handleImageFile = async (file) => {
     if (!file || !file.type.startsWith('image/')) {
       setOcrNote(t.ocrBadFile)
@@ -436,20 +570,147 @@ export default function App() {
     setOcrNote('')
     setJustOcred(false)
     try {
+      // PRIMARY path: vision extraction on the backend. If it returns usable
+      // text, use it directly (user still reviews via the "check it looks
+      // right" hint before checking). Any failure (no API key, network,
+      // non-OK response) silently falls through to the offline OCR pipeline.
+      try {
+        const visionText = await extractViaVision(file)
+        if (visionText && visionText.length >= 3) {
+          setMessage(visionText)
+          setJustOcred(true)
+          return
+        }
+      } catch {
+        // fall back to Tesseract — no user-facing error here.
+      }
+
       // Always load both scripts: scam screenshots are often English text
       // even when the user's UI language is Telugu.
       const worker = await createWorker('eng+tel')
       try {
-        const { data } = await worker.recognize(file)
-        const text = (data.text || '').trim()
-        if (text.length < 5) {
+        // PSM 11 = sparse text (multiple disconnected blocks). Default is 3.
+        // Guard the call — older tesseract.js builds may not expose setParameters.
+        try {
+          await worker.setParameters({ tessedit_pageseg_mode: '11' })
+        } catch {
+          // ignore — fall back to default PSM
+        }
+
+        const reconstruct = (data) => {
+          let t = ''
+          const rawWords = data.words || null
+          const rawLines = data.lines || null
+          const sourceWords = rawWords && rawWords.length ? rawWords : null
+          if (sourceWords) {
+            const normalized = sourceWords
+              .map((w) => {
+                const b = w.bbox || w
+                return { text: (w.text || '').trim(), x0: b.x0 ?? b.x ?? 0, y0: b.y0 ?? b.y ?? 0 }
+              })
+              .filter((w) => w.text)
+            if (normalized.length) {
+              normalized.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0)
+              const Y_TOL = 14
+              const lines = []
+              for (const w of normalized) {
+                let placed = false
+                for (const line of lines) {
+                  const avgY = line.reduce((s, o) => s + o.y0, 0) / line.length
+                  if (Math.abs(w.y0 - avgY) < Y_TOL) { line.push(w); placed = true; break }
+                }
+                if (!placed) lines.push([w])
+              }
+              for (const line of lines) line.sort((a, b) => a.x0 - b.x0)
+              lines.sort((a, b) => {
+                const ay = a.reduce((s, o) => s + o.y0, 0) / a.length
+                const by = b.reduce((s, o) => s + o.y0, 0) / b.length
+                return ay - by
+              })
+              t = lines.map((line) => line.map((w) => w.text).join(' ')).join('\n').trim()
+            }
+          } else if (rawLines && rawLines.length) {
+            const normalized = rawLines
+              .map((l) => {
+                const b = l.bbox || l
+                return { text: (l.text || '').trim(), y0: b.y0 ?? b.y ?? 0, x0: b.x0 ?? b.x ?? 0 }
+              })
+              .filter((l) => l.text)
+            if (normalized.length) {
+              normalized.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0)
+              t = normalized.map((l) => l.text).join('\n').trim()
+            }
+          }
+          if (!t) t = (data.text || '').trim()
+          return t
+        }
+
+        const logDiagnostic = (data, label) => {
+          try {
+            if (data.words && data.words.length) {
+              const words = data.words.map((w) => ({
+                text: w.text,
+                confidence: Math.round(w.confidence ?? 0),
+              }))
+              console.log(`[OCR ${label}] words:`, words)
+              const hasSms = words.some((w) => /credited|withdraw|9pm|bit\.ly|greatdeal/i.test(w.text))
+              console.log(`[OCR ${label}] contains SMS tokens?`, hasSms)
+            } else {
+              console.log(`[OCR ${label}] no words, text length`, (data.text || '').length)
+            }
+          } catch {
+            // diagnostic must never break OCR
+          }
+        }
+
+        let sourceBlob = file
+        let preprocessedBlob = null
+        try {
+          preprocessedBlob = await preprocessImageToBlob(file)
+          sourceBlob = preprocessedBlob
+        } catch (e) {
+          console.warn('[OCR] preprocess failed, falling back to original', e)
+          sourceBlob = file
+        }
+
+        let { data } = await worker.recognize(sourceBlob)
+        logDiagnostic(data, 'preprocessed')
+        let text = reconstruct(data)
+
+        // Fallback: preprocessed can hurt already good contrast images — retry original if too short
+        if (!text || text.trim().length < 15) {
+          console.log('[OCR] preprocessed text too short, retrying original', text?.length)
+          try {
+            const fallback = await worker.recognize(file)
+            logDiagnostic(fallback.data, 'original-fallback')
+            const fallbackText = reconstruct(fallback.data)
+            if (fallbackText && fallbackText.trim().length > (text?.trim().length || 0)) {
+              text = fallbackText
+              data = fallback.data
+            }
+          } catch {
+            // keep original text
+          }
+        }
+
+        if (!text || text.trim().length < 5) {
           setOcrNote(t.ocrEmpty)
           return
         }
-        // Fill the textarea with the extracted text but do NOT auto-analyze:
+
+        // Continuation 16: strip UI boilerplate before showing/analyzing
+        const cleanedText = stripUiNoise(text)
+        if (!cleanedText || cleanedText.trim().length < 10) {
+          // entire extraction was UI noise — do not analyze empty string
+          setOcrNote(t.ocrEmpty)
+          return
+        }
+
+        // Fill the textarea with the CLEANED text but do NOT auto-analyze:
         // OCR often mangles the text, so the user reviews/edits it first and
-        // presses the explicit Check button themselves.
-        setMessage(text)
+        // presses the explicit Check button themselves. The cleaned length is
+        // what the character-count indicator reflects.
+        setMessage(cleanedText)
         setJustOcred(true)
       } finally {
         await worker.terminate()
@@ -723,7 +984,7 @@ export default function App() {
 
           {justOcred && (
             <p style={{ color: COLORS.lanternDark, fontSize: 14, margin: '12px 0 0' }}>
-              {t.reviewOcrText}
+              {t.reviewOcrText} <span style={{ opacity: 0.85 }}>({message.length} {t.ocrChars})</span>
             </p>
           )}
 
@@ -777,6 +1038,9 @@ export default function App() {
               {loading ? t.analyzing : t.analyze}
             </button>
           </div>
+          <p style={{ color: COLORS.textMuted, fontSize: 12.5, margin: '10px 0 0', lineHeight: 1.4 }}>
+            {t.cropTip}
+          </p>
           {recorderState === 'recording' && (
             <p style={{ color: COLORS.lanternDark, fontSize: 14, margin: '12px 0 0' }}>{t.listening}</p>
           )}

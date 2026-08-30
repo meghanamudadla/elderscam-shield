@@ -13,6 +13,14 @@ Four cases exercise the full retrieve->reason->format LangGraph pipeline:
 import os
 import sys
 
+# Ensure UTF-8 output on Windows (cp1252 cannot encode '—' / '–' etc. in reasoning)
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+except Exception:
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.langgraph_pipeline import run_pipeline  # noqa: E402
@@ -213,6 +221,13 @@ def test_translation_backend_chain():
     print("Translation backend-chain unit tests passed.")
 
 
+def test_fake_credit_withdrawal_scam_flagged():
+    msg = "Dear customer, Your account has been successfully credited Rs.10001. Proceed to withdraw before 9PM. bit.ly/4mLF4fa"
+    result = run_pipeline(msg, "en")
+    print("FAKE CREDIT CASE:", result)
+    assert result["verdict"] in ("scam", "suspicious"), f"fake-credit scam not caught: {result}"
+
+
 if __name__ == "__main__":
     test_pipeline_cases()
     if not _translation_backend_available():
@@ -221,3 +236,4 @@ if __name__ == "__main__":
         test_telugu_response_is_actually_telugu()
         test_telugu_all_fields_are_telugu()
     test_translation_backend_chain()
+    test_fake_credit_withdrawal_scam_flagged()

@@ -114,6 +114,19 @@ KNOWLEDGE_BASE: list[dict] = [
             "transfer your balance to the RBI settlement account now."
         ),
     },
+    {
+        "id": "fake_credit_withdrawal",
+        "category": "scam",
+        "text": (
+            "A message claiming an amount of money has already been credited to "
+            "your account, urging you to 'withdraw', 'claim', or 'proceed' before "
+            "a short deadline (e.g. 'before 9PM', 'within 24 hours') via a shortened "
+            "or unfamiliar link. This is a reward/refund-style scam distinct from a "
+            "lottery-fee scam — it does not ask for upfront payment, instead using a "
+            "fake credited amount and a withdrawal deadline to create urgency and "
+            "lure a click."
+        ),
+    },
     # ------------------------------------------------------------- safe
     {
         "id": "routine-bill",
