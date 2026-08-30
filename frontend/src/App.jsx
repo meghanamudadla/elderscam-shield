@@ -10,6 +10,16 @@ import { COLORS, FONT, PAGE_STYLES } from './tokens.js'
 // ---------------------------------------------------------------------------
 const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 
+// ===========================================================================
+// REGRESSION-SENSITIVE FEATURES — verify these still exist after any full-file rewrite:
+// 1. Dangerous file extension check (.apk/.exe/etc.) — must run FIRST in handleImageFile
+// 2. OCR review-before-submit (extracted text is NOT auto-analyzed, user presses Check)
+// 3. Vision-extraction-first with Tesseract OCR fallback
+// 4. Listen button reads result.reasoning/redFlags/advice, NEVER the raw input message
+// If you are about to output a full rewrite of this file, confirm all 4 are still present
+// in your output before finishing your response.
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
 // Bilingual copy. Every piece of UI text lives here — nothing is hardcoded
 // in the components below.
@@ -547,12 +557,22 @@ export default function App() {
   const extractViaVision = useCallback(async (file) => {
     const form = new FormData()
     form.append('file', file)
+    console.log('[LAYER3-DIAG] Calling /extract-message-from-image for file:', file.name, 'size:', file.size)
     const res = await fetch(`${API_BASE}/extract-message-from-image`, {
       method: 'POST',
       body: form,
     })
-    if (!res.ok) throw new Error(String(res.status))
+    console.log('[LAYER3-DIAG] /extract-message-from-image HTTP status:', res.status)
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error('[LAYER3-DIAG] VISION FAILED — server returned non-OK:', res.status, errText)
+      throw new Error(String(res.status))
+    }
     const json = await res.json()
+    // *** IMPOSSIBLE-TO-MISS DIAGNOSTIC LOG — LAYER 3 ***
+    console.log('VISION RESPONSE:', json)
+    console.log('[LAYER3-DIAG] Extracted text length:', (json.text || '').trim().length, 'chars')
+    console.log('[LAYER3-DIAG] Extracted text preview:', (json.text || '').trim().slice(0, 200))
     return (json.text || '').trim()
   }, [])
 
@@ -562,6 +582,39 @@ export default function App() {
   // ourselves from word bounding boxes, sorted top->bottom then left->right,
   // and use PSM 11 (sparse text) which is best for multiple disconnected blocks.
   const handleImageFile = async (file) => {
+    // ============================================================
+    // CRITICAL SAFETY CHECK — DO NOT REMOVE OR MOVE THIS BLOCK.
+    // This must run FIRST, before any OCR/vision/LLM processing.
+    // An app-installer file shared directly in chat (not via an
+    // official app store) is inherently dangerous malware bait —
+    // this is a deterministic filename check, not a content
+    // analysis, and must short-circuit everything else below it.
+    // If you are rewriting this file, COPY THIS BLOCK VERBATIM
+    // into the new version before touching anything else.
+    // ============================================================
+    const DANGEROUS_EXT = [".apk", ".exe", ".msi", ".bat", ".sh", ".jar", ".apks"]
+    const isDangerousFile = file && DANGEROUS_EXT.some(ext => file.name.toLowerCase().endsWith(ext))
+    if (isDangerousFile) {
+      setResult({
+        verdict: "scam",
+        confidence: 98,
+        reasoning: lang === "te"
+          ? "చాట్ ద్వారా నేరుగా పంపిన యాప్ ఫైల్ (.apk) దాదాపు ఎల్లప్పుడూ మాల్వేర్ — ఇది బ్యాంకింగ్ వివరాలు దొంగిలించడానికి లేదా మీ ఫోన్పై నియంత్రణ పొందడానికి ఉపయోగించబడుతుంది."
+          : "An app file (.apk) sent directly through chat, outside the Play Store, is almost always malware used to steal banking details or take control of your phone.",
+        red_flags: lang === "te"
+          ? ["చాట్‌లో నేరుగా పంపిన యాప్ ఫైల్ (.apk)", "ప్లే స్టోర్ / యాప్ స్టోర్ నుండి కాదు"]
+          : ["App file (.apk) shared directly in chat", "Not from Play Store / App Store"],
+        advice: lang === "te"
+          ? ["దీన్ని ఇన్‌స్టాల్ చేయవద్దు", "ఫైల్‌ను తొలగించి పంపినవారిని బ్లాక్ చేయండి"]
+          : ["Do not install it", "Delete the file and block the sender"],
+      })
+      setOcrLoading(false)
+      setOcrNote('')
+      setJustOcred(false)
+      setShowReason(false)
+      return // STOP HERE — do not proceed to OCR, vision API, or /analyze
+    }
+
     if (!file || !file.type.startsWith('image/')) {
       setOcrNote(t.ocrBadFile)
       return
@@ -954,7 +1007,7 @@ export default function App() {
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,.apk,.exe,.msi,.bat,.sh,.jar,.apks"
             onChange={(e) => e.target.files[0] && handleImageFile(e.target.files[0])}
             style={{ display: 'none' }}
           />

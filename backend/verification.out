@@ -1,0 +1,62 @@
+==================================================
+STEP 5.1: TELUGU TRANSLATION TEST (/analyze)
+==================================================
+{
+  "verdict": "scam",
+  "confidence": 93,
+  "reasoning": "మీ ఖాతాకు రూ.10001 జమ చేయబడ్డాయని సందేశం చెబుతుంది మరియు షార్ట్ బిట్.లీ లింక్‌ని ఉపయోగించి రాత్రి 9 గంటలలోపు విత్‌డ్రా చేసుకోమని చెబుతుంది, ఇది క్లాసిక్ 'నకిలీ క్రెడిట్ మరియు తక్షణ ఉపసంహరణ' స్కామ్ నమూనాతో సరిపోతుంది.",
+  "red_flags": [
+    "ఖాతాకు విజయవంతంగా రూ.10001 జమ చేయబడింది",
+    "రాత్రి 9 గంటలలోపు విత్‌డ్రా చేసుకోవడానికి కొనసాగండి",
+    "bit.ly/4mLF4fa"
+  ],
+  "advice": [
+    "లింక్‌ను క్లిక్ చేయవద్దు",
+    "ఎటువంటి వ్యక్తిగత లేదా బ్యాంకింగ్ వివరాలను అందించవద్దు",
+    "అధికారిక సంప్రదింపు పద్ధతులను ఉపయోగించి మీ బ్యాంక్‌తో నేరుగా ఏవైనా వాదనలను ధృవీకరించండి",
+    "సందేశాన్ని తొలగించండి"
+  ],
+  "matched_patterns": [
+    "fake_credit_withdrawal",
+    "vishing-bank-tax-official",
+    "fake-customer-care",
+    "kyc-block-urgency"
+  ]
+}
+
+==================================================
+STEP 5.2: VISION EXTRACTION - CROPPED SCREENSHOT
+==================================================
+EXTRACTED TEXT:
+'Dear,greatdealsforyouin@ Your account has been\nsuccessfully credited Rs 10001. @ 21April Proceed\nto withdraw before 9PM. bit.ly/4mLF4fa\nOrderNowonudaanTNCA'
+
+==================================================
+STEP 5.3: VISION EXTRACTION - FULL SCREENSCREEN
+==================================================
+EXTRACTED TEXT:
+'Dear,greatdealsforyouin@ Your account has been successfully credited Rs 10001. @ 21 April Proceed to withdraw before 9PM. bit.ly/4mLF4fa OrderNowonudaanTNCA'
+
+==================================================
+STEP 5.4: VERDICT ANALYSIS ON EXTRACTED TEXT
+==================================================
+{
+  "verdict": "scam",
+  "confidence": 92,
+  "reasoning": "The message says your account was credited Rs 10001 and urges you to withdraw before 9 PM using a short bit.ly link, which matches the classic fake‑credit‑and‑deadline scam pattern.",
+  "red_flags": [
+    "\"account has been successfully credited Rs 10001\"",
+    "\"Proceed to withdraw before 9PM\"",
+    "\"bit.ly/4mLF4fa\""
+  ],
+  "advice": [
+    "Do not click the link or provide any personal details",
+    "Ignore the request to withdraw the money",
+    "Verify directly with your bank using official contact methods"
+  ],
+  "matched_patterns": [
+    "fake_credit_withdrawal",
+    "vishing-bank-tax-official",
+    "fake-customer-care",
+    "kyc-block-urgency"
+  ]
+}
