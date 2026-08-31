@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createWorker } from 'tesseract.js'
 import { COLORS, FONT, PAGE_STYLES } from './tokens.js'
+import { checkDangerousFile, buildDangerousFileVerdict } from './dangerousFileCheck.js'
 
 // ---------------------------------------------------------------------------
 // Backend base URL. In dev, the Vite proxy forwards /api/* -> http://127.0.0.1:8000
@@ -606,37 +607,19 @@ export default function App() {
   // ourselves from word bounding boxes, sorted top->bottom then left->right,
   // and use PSM 11 (sparse text) which is best for multiple disconnected blocks.
   const handleImageFile = async (file) => {
-    // ============================================================
-    // CRITICAL SAFETY CHECK — DO NOT REMOVE OR MOVE THIS BLOCK.
-    // This must run FIRST, before any OCR/vision/LLM processing.
-    // An app-installer file shared directly in chat (not via an
-    // official app store) is inherently dangerous malware bait —
-    // this is a deterministic filename check, not a content
-    // analysis, and must short-circuit everything else below it.
-    // If you are rewriting this file, COPY THIS BLOCK VERBATIM
-    // into the new version before touching anything else.
-    // ============================================================
-    const DANGEROUS_EXT = [".apk", ".exe", ".msi", ".bat", ".sh", ".jar", ".apks"]
-    const isDangerousFile = file && DANGEROUS_EXT.some(ext => file.name.toLowerCase().endsWith(ext))
-    if (isDangerousFile) {
-      setResult({
-        verdict: "scam",
-        confidence: 98,
-        reasoning: lang === "te"
-          ? "చాట్ ద్వారా నేరుగా పంపిన యాప్ ఫైల్ (.apk) దాదాపు ఎల్లప్పుడూ మాల్వేర్ — ఇది బ్యాంకింగ్ వివరాలు దొంగిలించడానికి లేదా మీ ఫోన్పై నియంత్రణ పొందడానికి ఉపయోగించబడుతుంది."
-          : "An app file (.apk) sent directly through chat, outside the Play Store, is almost always malware used to steal banking details or take control of your phone.",
-        red_flags: lang === "te"
-          ? ["చాట్‌లో నేరుగా పంపిన యాప్ ఫైల్ (.apk)", "ప్లే స్టోర్ / యాప్ స్టోర్ నుండి కాదు"]
-          : ["App file (.apk) shared directly in chat", "Not from Play Store / App Store"],
-        advice: lang === "te"
-          ? ["దీన్ని ఇన్‌స్టాల్ చేయవద్దు", "ఫైల్‌ను తొలగించి పంపినవారిని బ్లాక్ చేయండి"]
-          : ["Do not install it", "Delete the file and block the sender"],
-      })
+    // -------------------------------------------------------------------------
+    // CRITICAL SAFETY CHECK — runs FIRST, before OCR/vision/LLM.
+    // Logic lives in ./dangerousFileCheck.js — DO NOT inline it here again.
+    // If you are rewriting App.jsx, keep this import call; the logic stays in
+    // dangerousFileCheck.js so it cannot be silently lost during full rewrites.
+    // -------------------------------------------------------------------------
+    if (file && checkDangerousFile(file.name)) {
+      setResult(buildDangerousFileVerdict(lang))
       setOcrLoading(false)
       setOcrNote('')
       setJustOcred(false)
       setShowReason(false)
-      return // STOP HERE — do not proceed to OCR, vision API, or /analyze
+      return // STOP — do not proceed to OCR, vision API, or /analyze
     }
 
     if (!file || !file.type.startsWith('image/')) {

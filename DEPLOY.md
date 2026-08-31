@@ -51,7 +51,9 @@ Open `http://YOUR_SERVER:8080`. Logs: `docker compose logs -f`. Updates:
    - **Root directory**: `backend`
    - **Build command**: `pip install -r requirements.txt`
    - **Start command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-   - **Environment variable**: `GROQ_API_KEY` = your key
+   - **Environment variables** (set both in the Render dashboard → Environment tab):
+     - `GROQ_API_KEY` = your Groq key (https://console.groq.com) — needed for scam analysis verdicts
+     - `GEMINI_API_KEY` = your Gemini key (https://aistudio.google.com/apikey) — needed for vision-based screenshot extraction; **without this, every image upload silently falls back to weak Tesseract OCR**
 3. Deploy → note your URL, e.g. `https://scam-shield.onrender.com`.
    Verify: open `https://scam-shield.onrender.com/health` → `{"status":"ok"}`.
 
@@ -77,11 +79,13 @@ Open `http://YOUR_SERVER:8080`. Logs: `docker compose logs -f`. Updates:
 
 ## Environment variables
 
-| Where                | Variable        | Required | Effect                                        |
-|----------------------|-----------------|----------|-----------------------------------------------|
-| Backend host         | `GROQ_API_KEY`  | no       | Real LLM verdicts; unset → offline mock reasoner |
-| Frontend build (Vercel) | `VITE_API_BASE` | no     | Backend URL; unset → same-origin `/api`       |
-| Docker compose `.env`| `GROQ_API_KEY`  | no       | Passed through to the backend container       |
+| Where                | Variable          | Required | Effect                                             |
+|----------------------|-------------------|----------|----------------------------------------------------||
+| Backend host (Render)| `GROQ_API_KEY`    | no       | Real LLM scam analysis; unset → offline mock reasoner |
+| Backend host (Render)| `GEMINI_API_KEY`  | **yes**  | Vision-based screenshot text extraction; unset → silent fallback to Tesseract OCR (much weaker) |
+| Frontend build (Vercel) | `VITE_API_BASE` | no     | Backend URL; unset → same-origin `/api`            |
+| Docker compose `.env`| `GROQ_API_KEY`    | no       | Passed through to the backend container            |
+| Docker compose `.env`| `GEMINI_API_KEY`  | **yes**  | Passed through to the backend container            |
 
 ## Before production (important)
 
