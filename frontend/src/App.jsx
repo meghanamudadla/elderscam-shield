@@ -46,6 +46,9 @@ const COPY = {
     ocrEmpty: "Couldn't find any text in that image — try a clearer screenshot.",
     ocrBadFile: 'Please upload an image file.',
     ocrFailed: 'Something went wrong reading that image. Please try again.',
+    ocrGarbage:
+      "Couldn't read this image clearly — this often happens with dark-mode screenshots or cluttered layouts. " +
+      'Try: switching to light mode before taking the screenshot, cropping tightly to just the message, or typing the message manually.',
     reviewOcrText: 'Extracted from your screenshot — please check it looks right before checking.',
     ocrChars: 'characters extracted',
     cropTip: 'For best results, crop the screenshot to just the message before uploading.',
@@ -116,6 +119,9 @@ const COPY = {
     ocrEmpty: 'ఆ చిత్రంలో ఎటువంటి అక్షరాలు కనిపించలేదు — మరింత స్పష్టమైన స్క్రీన్‌షాట్ ప్రయత్నించండి.',
     ocrBadFile: 'దయచేసి చిత్రం (ఇమేజ్) ఫైల్ అప్‌లోడ్ చేయండి.',
     ocrFailed: 'ఆ చిత్రాన్ని చదవడంలో ఏదో సమస్య జరిగింది. మళ్ళీ ప్రయత్నించండి.',
+    ocrGarbage:
+      'ఈ చిత్రాన్ని స్పష్టంగా చదవలేకపోయాం — ఇది డార్క్ మోడ్ స్క్రీన్‌షాట్లు లేదా రద్దీగా ఉన్న చిత్రాలలో తరచూ జరుగుతుంది. ' +
+      'ప్రయత్నించండి: స్క్రీన్‌షాట్ తీసే ముందు లైట్ మోడ్‌కి మారండి, సందేశం వరకే కత్తిరించండి, లేదా సందేశాన్ని నేరుగా టైప్ చేయండి.',
     reviewOcrText: 'మీ స్క్రీన్‌షాట్ నుండి సంగ్రహించబడింది — తనిఖీ చేసే ముందు అది సరిగ్గా ఉందని నిర్ధారించుకోండి.',
     ocrChars: 'అక్షరాలు సంగ్రహించబడ్డాయి',
     cropTip: 'ఉత్తమ ఫలితాల కోసం, దయచేసి స్క్రీన్‌షాట్‌ను సందేశం వరకే కత్తిరించి అప్‌లోడ్ చేయండి.',
@@ -444,6 +450,24 @@ export default function App() {
     setMicNote('')
   }, [])
 
+  // ---- Garbage OCR detection — applied ONLY to Tesseract fallback output ----
+  // Vision output (from Gemini) is already coherent prose; we never second-guess it.
+  // Tesseract can produce random glyphs/symbols on dark-mode or cluttered images;
+  // this heuristic catches that before it silently populates the textarea.
+  const looksLikeGarbageOcr = (text) => {
+    if (!text || text.trim().length < 5) return true
+    const cleaned = text.replace(/\s/g, '')
+    if (cleaned.length === 0) return true
+    // Count characters that are normal readable text
+    const readableChars = (cleaned.match(/[\p{L}\p{N}.,!?@:/\-]/gu) || []).length
+    const readableRatio = readableChars / cleaned.length
+    // Count how many space-separated tokens are at least 2 chars (proxy for real words)
+    const words = text.trim().split(/\s+/).filter((w) => w.length >= 2)
+    const totalTokens = text.trim().split(/\s+/).length
+    const wordRatio = totalTokens > 0 ? words.length / totalTokens : 0
+    return readableRatio < 0.7 || wordRatio < 0.4
+  }
+
   // ---- UI noise stripping (Continuation 16) — general-purpose, not app-specific
   // Strips common non-message boilerplate (Truecaller banners, WhatsApp encrypted
   // notices, timestamps, status bar) after OCR; conservative to avoid stripping
@@ -756,6 +780,16 @@ export default function App() {
         if (!cleanedText || cleanedText.trim().length < 10) {
           // entire extraction was UI noise — do not analyze empty string
           setOcrNote(t.ocrEmpty)
+          return
+        }
+
+        // Garbage-output safety net: Tesseract on dark-mode / cluttered images
+        // sometimes produces random symbols instead of real text. Catch that
+        // BEFORE populating the textarea so users never see (or act on) nonsense.
+        // This check applies ONLY to this Tesseract path — vision output is
+        // already coherent prose and must not be filtered by this heuristic.
+        if (looksLikeGarbageOcr(cleanedText)) {
+          setOcrNote(t.ocrGarbage)
           return
         }
 
