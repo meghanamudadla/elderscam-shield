@@ -174,6 +174,11 @@ def reports_summary() -> dict:
 # This endpoint is meant to be tried FIRST by the frontend; if it fails (no
 # API key, no network, or any API error) it returns a clear non-OK error so
 # the frontend can fall back to the existing client-side Tesseract pipeline.
+#
+# Retry logic: transient failures (503, timeout, connection error) are retried
+# up to 3 times with exponential backoff (1s, 2s). Non-transient errors
+# (400, 401, 403, 404) fail immediately. This prevents transient Google-side
+# hiccups from pushing users to the worse OCR path.
 # ---------------------------------------------------------------------------
 
 # Vision model: Google Gemini (multimodal). The Groq account this app runs on
@@ -196,15 +201,41 @@ VISION_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
 
+# Retry configuration
+VISION_MAX_ATTEMPTS = 3
+VISION_BASE_DELAY_S = 1.0
+VISION_TRANSIENT_STATUSES = {503, 504, 502, 500}  # transient HTTP status codes
+VISION_TRANSIENT_EXCEPTIONS = (
+    "requests.exceptions.Timeout",
+    "requests.exceptions.ConnectionError",
+    "requests.exceptions.ChunkedEncodingError",
+    "requests.exceptions.ContentDecodingError",
+)
+
+
+def _is_transient_failure(exc: Exception) -> bool:
+    """Check if an exception represents a transient, retryable failure."""
+    # Check for requests-specific transient exceptions
+    exc_type = type(exc).__name__
+    if exc_type in ("Timeout", "ConnectionError", "ChunkedEncodingError", "ContentDecodingError"):
+        return True
+    # Check for HTTP status codes in exception message
+    exc_str = str(exc)
+    for status in VISION_TRANSIENT_STATUSES:
+        if str(status) in exc_str:
+            return True
+    return False
+
 
 @app.post("/extract-message-from-image")
 async def extract_message_from_image(file: UploadFile = File(...)) -> dict:
     """Extract just the actual message text from a screenshot via a vision LLM.
 
-    Uses Google Gemini (multimodal). Returns {"text": "..."} on success. On ANY
-    failure (missing API key, network error, API error, or an unreadable image)
-    it raises a 503 with a clear detail, so the caller can fall back to the
-    offline OCR pipeline instead of failing silently.
+    Uses Google Gemini (multimodal). Returns {"text": "..."} on success.
+    On transient failure (503, timeout, connection error), retries up to 3 times
+    with exponential backoff (1s, 2s). Only after all retries are exhausted
+    does it raise a 503 so the caller can fall back to the offline OCR pipeline.
+    Non-transient failures (400, 401, 403, 404, etc.) fail immediately.
     """
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Please upload an image file.")
@@ -226,50 +257,77 @@ async def extract_message_from_image(file: UploadFile = File(...)) -> dict:
     b64 = base64.b64encode(raw_bytes).decode("ascii")
     mime = file.content_type or "image/png"
 
-    try:
-        import requests  # already a dependency; imported lazily
+    import requests  # already a dependency; imported lazily
 
-        payload = {
-            "systemInstruction": {"parts": [{"text": VISION_SYSTEM_PROMPT}]},
-            "contents": [
-                {
-                    "parts": [
-                        {"text": "Extract only the message text from this screenshot."},
-                        {"inline_data": {"mime_type": mime, "data": b64}},
-                    ]
-                }
-            ],
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024},
-        }
-        resp = requests.post(
-            VISION_API_URL.format(model=VISION_MODEL),
-            params={"key": api_key},
-            json=payload,
-            timeout=60,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        # Gemini returns text in candidates[0].content.parts[].text; some replies
-        # spread it across multiple parts, so concatenate defensively.
-        parts = (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [])
-        )
-        text = "".join(p.get("text", "") for p in parts).strip()
-        if not text:
-            # Surface API-level blocking (e.g. safety filters) rather than fail silently.
-            if "error" in data:
-                raise RuntimeError(data["error"])
-            raise RuntimeError("Gemini returned no extractable text")
-    except Exception as exc:  # noqa: BLE001 — any vision failure → 503 fallback
-        logger.warning("Vision extraction failed (%s); frontend will use OCR.", exc)
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Vision extraction failed (network or API error). The app will "
-                "fall back to on-device OCR."
-            ),
-        ) from exc
+    payload = {
+        "systemInstruction": {"parts": [{"text": VISION_SYSTEM_PROMPT}]},
+        "contents": [
+            {
+                "parts": [
+                    {"text": "Extract only the message text from this screenshot."},
+                    {"inline_data": {"mime_type": mime, "data": b64}},
+                ]
+            }
+        ],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024},
+    }
 
-    return {"text": text}
+    last_exc: Exception | None = None
+    for attempt in range(1, VISION_MAX_ATTEMPTS + 1):
+        try:
+            resp = requests.post(
+                VISION_API_URL.format(model=VISION_MODEL),
+                params={"key": api_key},
+                json=payload,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # Gemini returns text in candidates[0].content.parts[].text; some replies
+            # spread it across multiple parts, so concatenate defensively.
+            parts = (
+                data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [])
+            )
+            text = "".join(p.get("text", "") for p in parts).strip()
+            if not text:
+                # Surface API-level blocking (e.g. safety filters) rather than fail silently.
+                if "error" in data:
+                    raise RuntimeError(data["error"])
+                raise RuntimeError("Gemini returned no extractable text")
+
+            logger.info("Vision extraction succeeded on attempt %d/%d", attempt, VISION_MAX_ATTEMPTS)
+            return {"text": text}
+
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            is_transient = _is_transient_failure(exc)
+            logger.warning(
+                "Vision attempt %d/%d failed (%s)%s",
+                attempt,
+                VISION_MAX_ATTEMPTS,
+                exc,
+                " — retrying" if (is_transient and attempt < VISION_MAX_ATTEMPTS) else " — not retryable" if not is_transient else " — max attempts reached",
+            )
+            if not is_transient or attempt >= VISION_MAX_ATTEMPTS:
+                break
+            # Exponential backoff: 1s, 2s, ...
+            delay = VISION_BASE_DELAY_S * attempt
+            logger.info("Waiting %.1fs before retry...", delay)
+            import time
+            time.sleep(delay)
+
+    # All retries exhausted or non-transient failure
+    logger.error(
+        "Vision extraction failed after %d attempt(s) (%s); frontend will use OCR.",
+        VISION_MAX_ATTEMPTS,
+        last_exc,
+    )
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "Vision extraction failed (network or API error). The app will "
+            "fall back to on-device OCR."
+        ),
+    ) from last_exc
