@@ -175,14 +175,14 @@ def reports_summary() -> dict:
 # API key, no network, or any API error) it returns a clear non-OK error so
 # the frontend can fall back to the existing client-side Tesseract pipeline.
 #
-# Retry logic: transient failures (503, timeout, connection error, 429) are
-# retried up to 3 times with exponential backoff (1s, 2s). Non-transient
-# errors (400, 401, 403, 404) fail immediately.
+# Retry logic: transient failures (503, 504, 502, 500, timeout, 429) are retried
+# up to 3 times with exponential backoff (1s, 2s). Non-transient errors
+# (400, 401, 403, 404) fail immediately.
 # ---------------------------------------------------------------------------
 
-# Vision model: Groq (llama-4-scout multimodal). Reuses the same GROQ_API_KEY
-# already required for the reasoning step — no additional secret needed.
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# Vision model: Google Gemini 1.5 Flash (multimodal). Free tier available at
+# https://aistudio.google.com/app/apikey (key starts with AIzaSy...).
+VISION_MODEL = "gemini-1.5-flash"
 
 VISION_SYSTEM_PROMPT = (
     "You are a text extractor for a scam-detection app. "
@@ -212,13 +212,13 @@ VISION_SYSTEM_PROMPT = (
     "If you cannot find any message text at all, return exactly: [NO_TEXT_FOUND]"
 )
 
-# Groq OpenAI-compatible endpoint
-VISION_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+VISION_API_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
 
 # Retry configuration
 VISION_MAX_ATTEMPTS = 3
 VISION_BASE_DELAY_S = 1.0
-# 429 (rate limit) is transient — retry after backoff
 VISION_TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
 
 
@@ -236,23 +236,23 @@ def _is_transient_failure(exc: Exception) -> bool:
 
 @app.post("/extract-message-from-image")
 async def extract_message_from_image(file: UploadFile = File(...)) -> dict:
-    """Extract just the actual message text from a screenshot via a vision LLM.
+    """Extract just the actual message text from a screenshot via Gemini vision LLM.
 
-    Uses Groq's llama-4-scout vision model (reuses GROQ_API_KEY).
-    Returns {"text": "..."} on success.
-    On transient failure (429, 503, timeout), retries up to 3 times with
-    exponential backoff (1s, 2s). Only after all retries are exhausted does
-    it raise a 503 so the caller can fall back to the offline OCR pipeline.
+    Uses Google Gemini 1.5 Flash (multimodal). Returns {"text": "..."} on success.
+    On transient failure (429, 503, timeout, connection error), retries up to 3 times
+    with exponential backoff (1s, 2s). Only after all retries are exhausted
+    does it raise a 503 so the caller can fall back to the offline OCR pipeline.
+    Non-transient failures (400, 401, 403, 404, etc.) fail immediately.
     """
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Please upload an image file.")
 
-    api_key = os.environ.get("GROQ_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Vision extraction is unavailable (no GROQ_API_KEY configured on "
+                "Vision extraction is unavailable (no GEMINI_API_KEY configured on "
                 "the server). The app will fall back to on-device OCR."
             ),
         )
@@ -261,62 +261,49 @@ async def extract_message_from_image(file: UploadFile = File(...)) -> dict:
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="The uploaded image was empty.")
 
-    mime = file.content_type or "image/png"
     b64 = base64.b64encode(raw_bytes).decode("ascii")
-    data_url = f"data:{mime};base64,{b64}"
+    mime = file.content_type or "image/png"
 
     import requests  # already a dependency; imported lazily
 
     payload = {
-        "model": VISION_MODEL,
-        "messages": [
-            {"role": "system", "content": VISION_SYSTEM_PROMPT},
+        "systemInstruction": {"parts": [{"text": VISION_SYSTEM_PROMPT}]},
+        "contents": [
             {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": data_url},
-                    },
-                    {
-                        "type": "text",
-                        "text": "Extract only the message text from this screenshot.",
-                    },
-                ],
-            },
+                "parts": [
+                    {"text": "Extract only the message text from this screenshot."},
+                    {"inline_data": {"mime_type": mime, "data": b64}},
+                ]
+            }
         ],
-        "temperature": 0.1,
-        "max_tokens": 1024,
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024},
     }
 
     last_exc: Exception | None = None
     for attempt in range(1, VISION_MAX_ATTEMPTS + 1):
         try:
             resp = requests.post(
-                VISION_API_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                VISION_API_URL.format(model=VISION_MODEL),
+                params={"key": api_key},
                 json=payload,
                 timeout=60,
             )
             resp.raise_for_status()
             data = resp.json()
 
-            text = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                or ""
-            ).strip()
-
+            parts = (
+                data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [])
+            )
+            text = "".join(p.get("text", "") for p in parts).strip()
             if not text:
-                raise RuntimeError("Groq vision returned no extractable text")
+                if "error" in data:
+                    raise RuntimeError(data["error"])
+                raise RuntimeError("Gemini returned no extractable text")
 
-            # Honour the [NO_TEXT_FOUND] sentinel — fall back to OCR
             if text.strip() == "[NO_TEXT_FOUND]":
-                raise RuntimeError("Vision model found no message text in the screenshot")
+                raise RuntimeError("Gemini found no message text in the screenshot")
 
             logger.info("Vision extraction succeeded on attempt %d/%d", attempt, VISION_MAX_ATTEMPTS)
             return {"text": text}
@@ -338,7 +325,6 @@ async def extract_message_from_image(file: UploadFile = File(...)) -> dict:
             import time
             time.sleep(delay)
 
-    # All retries exhausted or non-transient failure
     logger.error(
         "Vision extraction failed after %d attempt(s) (%s); frontend will use OCR.",
         VISION_MAX_ATTEMPTS,
