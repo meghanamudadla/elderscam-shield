@@ -188,13 +188,31 @@ def reports_summary() -> dict:
 VISION_MODEL = "gemini-2.5-flash"
 
 VISION_SYSTEM_PROMPT = (
-    "This is a screenshot of a messaging or caller-ID app. Extract ONLY the "
-    "actual message text that a person sent or received — the real "
-    "SMS/WhatsApp/chat content. Ignore and do NOT include: security notices, "
-    "fraud warnings, encryption banners, delivery/read receipts, timestamps, "
-    "status bar icons, transaction summary cards, contact names, or any app "
-    "interface chrome. Return ONLY the raw message text, exactly as written, "
-    "with no commentary, no quotation marks, no explanation of what you excluded."
+    "You are a text extractor for a scam-detection app. "
+    "This is a screenshot from a phone — it could be an SMS app, WhatsApp, "
+    "a missed-call screen, a caller-ID app (like Truecaller), or any other "
+    "messaging or telephony app on Android or iOS.\n\n"
+    "Your job: extract ALL text that was actually communicated to the phone "
+    "owner — the real message body. This INCLUDES:\n"
+    "- The full body text of every SMS or chat bubble, top to bottom\n"
+    "- The sender's phone number or name if it is shown (it could be an "
+    "unknown number like +91-XXXXXXXXXX, which IS relevant for scam detection)\n"
+    "- Any URL or link text visible in the message\n"
+    "- Any amount, account number, OTP, or reference number in the message\n\n"
+    "EXCLUDE (do NOT copy these):\n"
+    "- App UI chrome: navigation bars, back buttons, menu icons\n"
+    "- Encryption/security banners (e.g. 'Messages are end-to-end encrypted')\n"
+    "- Truecaller/caller-ID fraud warnings or 'Reported as spam' banners "
+    "(these are app-generated, NOT the message content)\n"
+    "- Delivery/read receipts (Delivered, Read, Seen)\n"
+    "- Timestamps and dates\n"
+    "- Phone status bar (battery, signal, time)\n"
+    "- Your own outgoing message bubbles\n\n"
+    "If there are multiple incoming message bubbles, join them in reading order "
+    "(top to bottom) with a blank line between each bubble.\n\n"
+    "Return ONLY the extracted text — no commentary, no quotation marks, "
+    "no explanation of what you included or excluded. "
+    "If you cannot find any message text at all, return exactly: [NO_TEXT_FOUND]"
 )
 
 VISION_API_URL = (
@@ -296,6 +314,13 @@ async def extract_message_from_image(file: UploadFile = File(...)) -> dict:
                 if "error" in data:
                     raise RuntimeError(data["error"])
                 raise RuntimeError("Gemini returned no extractable text")
+
+            # Honour the [NO_TEXT_FOUND] sentinel the prompt instructs Gemini
+            # to return when no message body is visible. Treat it as empty so
+            # the frontend falls back to Tesseract OCR rather than receiving
+            # the sentinel string as if it were real message content.
+            if text.strip() == "[NO_TEXT_FOUND]":
+                raise RuntimeError("Gemini found no message text in the screenshot")
 
             logger.info("Vision extraction succeeded on attempt %d/%d", attempt, VISION_MAX_ATTEMPTS)
             return {"text": text}
