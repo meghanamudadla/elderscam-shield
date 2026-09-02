@@ -16,9 +16,11 @@ The app runs at <http://127.0.0.1:8000>. Docs (auto-generated): <http://127.0.0.
 
 ## Environment
 
-| Variable       | Required | Purpose                                                            |
-|----------------|----------|--------------------------------------------------------------------|
-| `GROQ_API_KEY` | optional | If set, verdicts come from Groq's `openai/gpt-oss-120b`. If unset, the deterministic offline mock reasoner is used (fully functional for demo/testing — no network needed). |
+| Variable           | Required | Purpose                                                            |
+|--------------------|----------|-----------------------------------------------------------------------|
+| `GROQ_API_KEY`     | optional | If set, verdicts come from Groq's `openai/gpt-oss-120b`. If unset, the deterministic offline mock reasoner is used (fully functional for demo/testing — no network needed). |
+| `GEMINI_API_KEY`   | optional | Used for Gemini 1.5 Flash vision extraction (primary path for screenshots) and as a translation backend. Free key at [AI Studio](https://aistudio.google.com/app/apikey). |
+| `OCRSPACE_API_KEY` | optional | Fallback OCR when Gemini vision is unavailable. Uses [OCR.space](https://ocr.space/ocrapi) (free tier: ~25k req/month, no credit card). Raw OCR text is then filtered by Groq to isolate the real message. |
 
 ## Endpoints
 

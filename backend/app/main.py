@@ -236,104 +236,123 @@ def _is_transient_failure(exc: Exception) -> bool:
 
 @app.post("/extract-message-from-image")
 async def extract_message_from_image(file: UploadFile = File(...)) -> dict:
-    """Extract just the actual message text from a screenshot via Gemini vision LLM.
+    """Extract just the actual message text from a screenshot.
 
-    Uses Google Gemini 1.5 Flash (multimodal). Returns {"text": "..."} on success.
-    On transient failure (429, 503, timeout, connection error), retries up to 3 times
-    with exponential backoff (1s, 2s). Only after all retries are exhausted
-    does it raise a 503 so the caller can fall back to the offline OCR pipeline.
-    Non-transient failures (400, 401, 403, 404, etc.) fail immediately.
+    Fallback order:
+      1. Gemini vision (best — reads pixels AND understands context in one step)
+      2. OCR.space raw OCR → Groq semantic filter (good — two specialized steps)
+      3. 503 → client-side Tesseract.js (last resort)
     """
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Please upload an image file.")
-
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Vision extraction is unavailable (no GEMINI_API_KEY configured on "
-                "the server). The app will fall back to on-device OCR."
-            ),
-        )
 
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="The uploaded image was empty.")
 
-    b64 = base64.b64encode(raw_bytes).decode("ascii")
+    filename = file.filename or "image.png"
     mime = file.content_type or "image/png"
 
-    import requests  # already a dependency; imported lazily
+    # ----- PATH 1: Gemini vision (primary) -----
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        import requests  # already a dependency; imported lazily
 
-    payload = {
-        "systemInstruction": {"parts": [{"text": VISION_SYSTEM_PROMPT}]},
-        "contents": [
-            {
-                "parts": [
-                    {"text": "Extract only the message text from this screenshot."},
-                    {"inline_data": {"mime_type": mime, "data": b64}},
-                ]
-            }
-        ],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024},
-    }
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
+        payload = {
+            "systemInstruction": {"parts": [{"text": VISION_SYSTEM_PROMPT}]},
+            "contents": [
+                {
+                    "parts": [
+                        {"text": "Extract only the message text from this screenshot."},
+                        {"inline_data": {"mime_type": mime, "data": b64}},
+                    ]
+                }
+            ],
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024},
+        }
 
-    last_exc: Exception | None = None
-    for attempt in range(1, VISION_MAX_ATTEMPTS + 1):
-        try:
-            resp = requests.post(
-                VISION_API_URL.format(model=VISION_MODEL),
-                params={"key": api_key},
-                json=payload,
-                timeout=60,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        gemini_exc: Exception | None = None
+        for attempt in range(1, VISION_MAX_ATTEMPTS + 1):
+            try:
+                resp = requests.post(
+                    VISION_API_URL.format(model=VISION_MODEL),
+                    params={"key": api_key},
+                    json=payload,
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                data = resp.json()
 
-            parts = (
-                data.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [])
-            )
-            text = "".join(p.get("text", "") for p in parts).strip()
-            if not text:
-                if "error" in data:
-                    raise RuntimeError(data["error"])
-                raise RuntimeError("Gemini returned no extractable text")
+                parts = (
+                    data.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [])
+                )
+                text = "".join(p.get("text", "") for p in parts).strip()
+                if not text:
+                    if "error" in data:
+                        raise RuntimeError(data["error"])
+                    raise RuntimeError("Gemini returned no extractable text")
 
-            if text.strip() == "[NO_TEXT_FOUND]":
-                raise RuntimeError("Gemini found no message text in the screenshot")
+                if text.strip() == "[NO_TEXT_FOUND]":
+                    raise RuntimeError("Gemini found no message text in the screenshot")
 
-            logger.info("Vision extraction succeeded on attempt %d/%d", attempt, VISION_MAX_ATTEMPTS)
-            return {"text": text}
+                logger.info("Vision extraction succeeded on attempt %d/%d", attempt, VISION_MAX_ATTEMPTS)
+                return {"text": text}
 
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            is_transient = _is_transient_failure(exc)
-            logger.warning(
-                "Vision attempt %d/%d failed (%s)%s",
-                attempt,
-                VISION_MAX_ATTEMPTS,
-                exc,
-                " — retrying" if (is_transient and attempt < VISION_MAX_ATTEMPTS) else " — not retryable" if not is_transient else " — max attempts reached",
-            )
-            if not is_transient or attempt >= VISION_MAX_ATTEMPTS:
-                break
-            delay = VISION_BASE_DELAY_S * attempt
-            logger.info("Waiting %.1fs before retry...", delay)
-            import time
-            time.sleep(delay)
+            except Exception as exc:  # noqa: BLE001
+                gemini_exc = exc
+                is_transient = _is_transient_failure(exc)
+                logger.warning(
+                    "Vision attempt %d/%d failed (%s)%s",
+                    attempt,
+                    VISION_MAX_ATTEMPTS,
+                    exc,
+                    " — retrying" if (is_transient and attempt < VISION_MAX_ATTEMPTS) else " — not retryable" if not is_transient else " — max attempts reached",
+                )
+                if not is_transient or attempt >= VISION_MAX_ATTEMPTS:
+                    break
+                delay = VISION_BASE_DELAY_S * attempt
+                logger.info("Waiting %.1fs before retry...", delay)
+                import time
+                time.sleep(delay)
 
-    logger.error(
-        "Vision extraction failed after %d attempt(s) (%s); frontend will use OCR.",
-        VISION_MAX_ATTEMPTS,
-        last_exc,
-    )
+        logger.warning(
+            "Gemini vision failed after %d attempt(s) (%s); trying OCR.space fallback.",
+            VISION_MAX_ATTEMPTS,
+            gemini_exc,
+        )
+    else:
+        logger.info("No GEMINI_API_KEY configured; skipping Gemini, trying OCR.space.")
+
+    # ----- PATH 2: OCR.space + Groq semantic filter (fallback) -----
+    try:
+        from .ocr_extract import extract_raw_text
+        from .llm import filter_real_message
+
+        raw_ocr = extract_raw_text(raw_bytes, filename)
+        if not raw_ocr:
+            raise RuntimeError("OCR.space returned empty text")
+        logger.info("OCR.space raw extraction succeeded (%d chars)", len(raw_ocr))
+
+        cleaned = filter_real_message(raw_ocr)
+        if not cleaned:
+            cleaned = raw_ocr  # Groq filtering emptied it; use raw OCR
+        logger.info("Groq semantic filter done (%d chars)", len(cleaned))
+        return {"text": cleaned}
+
+    except Exception as ocr_exc:  # noqa: BLE001
+        logger.error(
+            "OCR.space fallback also failed (%s); frontend will use Tesseract.js.",
+            ocr_exc,
+        )
+
+    # ----- PATH 3: 503 → client-side Tesseract.js (last resort) -----
     raise HTTPException(
         status_code=503,
         detail=(
-            "Vision extraction failed (network or API error). The app will "
-            "fall back to on-device OCR."
+            "Vision extraction failed (both Gemini and OCR.space unavailable). "
+            "The app will fall back to on-device OCR."
         ),
-    ) from last_exc
+    )

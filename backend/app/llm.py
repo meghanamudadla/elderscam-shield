@@ -48,6 +48,45 @@ logger = logging.getLogger(__name__)
 
 GROQ_MODEL = "openai/gpt-oss-120b"
 
+
+def filter_real_message(raw_ocr_text: str) -> str:
+    """
+    Takes messy raw OCR output (which may include app UI chrome —
+    security banners, timestamps, delivery receipts, contact cards,
+    button labels) and returns ONLY the actual message content a
+    person sent or received. This is a text-only, fast Groq call —
+    much cheaper and faster than a vision call, and Groq is already
+    proven reliable in this project.
+    """
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        return raw_ocr_text  # no key configured, pass through unfiltered
+
+    from groq import Groq
+    client = Groq(api_key=api_key)
+    system_prompt = (
+        "You will be given raw, messy OCR output from a screenshot of a "
+        "messaging or caller-ID app. It may include app interface text "
+        "mixed in with the real message — security notices, fraud warnings, "
+        "encryption banners, delivery/read receipts, timestamps, status bar "
+        "text, contact names, button labels (Block/Add/Unblock), 'Forwarded' "
+        "labels, attachment file names. Extract ONLY the actual message "
+        "content a person sent or received. Return ONLY that text, exactly "
+        "as written, with no commentary, no quotation marks, no explanation "
+        "of what you removed. If an attachment filename (like a .apk file) "
+        "is part of the actual message context, include it."
+    )
+    completion = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": raw_ocr_text},
+        ],
+        temperature=0.1,
+        max_tokens=500,
+    )
+    return completion.choices[0].message.content.strip()
+
 # In-process verdict cache keyed by (message, matched pattern ids). Scam
 # messages circulate verbatim to thousands of people, so repeated analyses
 # of the same text hit this cache instead of the LLM — this is the main
