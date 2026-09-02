@@ -439,7 +439,8 @@ def _drop_fragments(result: dict) -> dict:
     return result
 
 
-def _groq_verdict(message: str, patterns: list[RetrievedPattern]) -> dict:
+def _groq_verdict(message: str, patterns: list[RetrievedPattern],
+                  web_findings: list | None = None) -> dict:
     """Call Groq's openai/gpt-oss-120b, strictly grounded in `patterns`.
 
     Always asks for English output — translation to Telugu happens later in
@@ -455,6 +456,17 @@ def _groq_verdict(message: str, patterns: list[RetrievedPattern]) -> dict:
 
     pattern_lines = "\n".join(f"- [{p.category}] {p.text}" for p in patterns)
     system_prompt = SYSTEM_TEMPLATE.format(pattern_lines=pattern_lines)
+
+    # If web search found this phone number in scam reports, inject strong
+    # evidence into the system prompt so the LLM factors it into the verdict.
+    if web_findings:
+        system_prompt += (
+            "\n\nIMPORTANT: A phone number in this message has been found in "
+            "live web search results associated with scam/fraud reports. Treat "
+            "this as strong evidence toward a scam verdict, and explicitly "
+            "mention in your reasoning that this number has public scam reports "
+            "online — cite this as a red flag."
+        )
 
     kwargs = dict(
         model=GROQ_MODEL,
@@ -556,13 +568,22 @@ def _mock_reason(message: str, hits: list[str], top: RetrievedPattern, verdict: 
     return f"{match_line} {analogy} {_VERDICT_CAUTION_EN[verdict]}"
 
 
-def _mock_verdict(message: str, patterns: list[RetrievedPattern]) -> dict:
+def _mock_verdict(message: str, patterns: list[RetrievedPattern],
+                  web_findings: list | None = None) -> dict:
     """Deterministic offline reasoner — no network, fully testable.
 
     Always produces English output (the same language both paths generate
     in); Telugu is produced by the translation step in get_verdict.
+
+    If web_findings is non-empty (phone number flagged by live web search),
+    forces verdict=scam with confidence >= 92 and adds a bilingual red flag.
     """
     top, hits, _, verdict, confidence = _mock_score(message, patterns)
+
+    # If a phone number was flagged by live web search, override verdict
+    if web_findings:
+        verdict = "scam"
+        confidence = max(confidence, 92)
 
     flags: list[str] = []
     for kw in hits:
@@ -571,6 +592,10 @@ def _mock_verdict(message: str, patterns: list[RetrievedPattern]) -> dict:
             flags.append(phrase)
         if len(flags) >= 5:
             break
+
+    # Add web-report red flag if phone number was flagged
+    if web_findings:
+        flags.insert(0, "This phone number has been reported online as associated with scam activity / ఈ ఫోన్ నంబర్ ఆన్‌లైన్‌లో స్కామ్ కార్యకలాపాలతో అనుబంధంగా నివేదించబడింది")
 
     return {
         "verdict": verdict,
@@ -581,12 +606,20 @@ def _mock_verdict(message: str, patterns: list[RetrievedPattern]) -> dict:
     }
 
 
-def get_verdict(message: str, patterns: list[RetrievedPattern], language: str = "en") -> dict:
+def get_verdict(message: str, patterns: list[RetrievedPattern],
+                language: str = "en", *,
+                web_findings: list | None = None) -> dict:
     """Return {verdict, confidence, reasoning, red_flags[], advice[]}.
 
     Uses Groq when GROQ_API_KEY is set; otherwise falls back to the mock
     reasoner (and also on any Groq/network error, so the service never
     hard-fails because of the LLM provider).
+
+    web_findings: if non-empty (phone numbers flagged by live Tavily web
+    search), both the Groq and mock paths treat the findings as strong
+    evidence of a scam. The cache key includes whether findings were
+    present so a message analysed with and without web evidence gets
+    separate cache entries.
 
     Language handling: both paths generate ENGLISH only. For language == "te"
     the final English strings are translated deterministically — reasoning
@@ -605,17 +638,18 @@ def get_verdict(message: str, patterns: list[RetrievedPattern], language: str = 
     the LLM — the main defence against free-tier 429s, on top of the one
     retry inside _groq_verdict.
     """
-    cache_key = (message, tuple(p.id for p in patterns))
+    has_web = bool(web_findings)
+    cache_key = (message, tuple(p.id for p in patterns), has_web)
     cached = _VERDICT_CACHE.get(cache_key)
     if cached is None:
-        result: dict = _mock_verdict(message, patterns)
+        result: dict = _mock_verdict(message, patterns, web_findings=web_findings)
 
         if os.environ.get("GROQ_API_KEY"):
             try:
-                result = _groq_verdict(message, patterns)
+                result = _groq_verdict(message, patterns, web_findings=web_findings)
             except Exception as exc:  # network, quota, malformed JSON, ...
                 logger.warning("Groq verdict failed (%s); using mock reasoner.", exc)
-                result = _mock_verdict(message, patterns)
+                result = _mock_verdict(message, patterns, web_findings=web_findings)
 
         result = _drop_fragments(result)
 

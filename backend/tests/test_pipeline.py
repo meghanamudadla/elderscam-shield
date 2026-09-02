@@ -228,6 +228,44 @@ def test_fake_credit_withdrawal_scam_flagged():
     assert result["verdict"] in ("scam", "suspicious"), f"fake-credit scam not caught: {result}"
 
 
+def test_web_verify_flagged_number():
+    """When Tavily reports a phone number as suspicious, the pipeline must
+    produce a scam verdict with a red flag mentioning the web report.
+
+    Uses a mock — no real API calls, fully deterministic.
+    """
+    from unittest.mock import patch
+
+    suspicious_result = {
+        "checked": True,
+        "suspicious": True,
+        "summary": "Found 3 web result(s), 2 scam-indicator terms",
+        "top_titles": ["Scam alert: +919876543210", "Beware of this number"],
+    }
+
+    msg = "Hi, call me on +919876543210 for your lottery prize. Send Rs.500 processing fee first."
+
+    with patch("app.langgraph_pipeline.check_number_reputation", return_value=suspicious_result):
+        result = run_pipeline(msg, "en")
+
+    assert result["verdict"] == "scam", f"expected scam, got {result['verdict']!r}"
+    assert result["confidence"] >= 92, f"expected confidence >= 92, got {result['confidence']}"
+
+    # At least one red flag must mention the phone number web report —
+    # the mock path uses "reported online" / "scam activity", the Groq
+    # LLM path may phrase it differently (e.g. "scam reports", "reported").
+    web_flag_found = any(
+        "reported online" in flag.lower()
+        or "scam activity" in flag.lower()
+        or "scam report" in flag.lower()
+        or ("reported" in flag.lower() and "scam" in flag.lower())
+        for flag in result["red_flags"]
+    )
+    assert web_flag_found, f"no web-report red flag found in {result['red_flags']}"
+    print(f"[web-verify] verdict={result['verdict']} confidence={result['confidence']} flags={result['red_flags'][:2]}")
+    print("Web-verify flagged-number test passed.")
+
+
 if __name__ == "__main__":
     test_pipeline_cases()
     if not _translation_backend_available():
@@ -237,3 +275,4 @@ if __name__ == "__main__":
         test_telugu_all_fields_are_telugu()
     test_translation_backend_chain()
     test_fake_credit_withdrawal_scam_flagged()
+    test_web_verify_flagged_number()

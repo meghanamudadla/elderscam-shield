@@ -21,6 +21,7 @@ The app runs at <http://127.0.0.1:8000>. Docs (auto-generated): <http://127.0.0.
 | `GROQ_API_KEY`     | optional | If set, verdicts come from Groq's `openai/gpt-oss-120b`. If unset, the deterministic offline mock reasoner is used (fully functional for demo/testing — no network needed). |
 | `GEMINI_API_KEY`   | optional | Used for Gemini 1.5 Flash vision extraction (primary path for screenshots) and as a translation backend. Free key at [AI Studio](https://aistudio.google.com/app/apikey). |
 | `OCRSPACE_API_KEY` | optional | Fallback OCR when Gemini vision is unavailable. Uses [OCR.space](https://ocr.space/ocrapi) (free tier: ~25k req/month, no credit card). Raw OCR text is then filtered by Groq to isolate the real message. |
+| `TAVILY_API_KEY`   | optional | Enables live web search to check if phone numbers in messages have been publicly reported as scam. Free key at [tavily.com](https://tavily.com) (generous free tier, no credit card). |
 
 ## Endpoints
 
@@ -43,6 +44,22 @@ pytest tests/test_pipeline.py        # or via pytest
 Runs 4 cases through the full pipeline: KYC-urgency scam, safe bill,
 digital-arrest scam, and a Telugu scam message, plus two Telugu-conformance
 checks.
+
+## Phone number web verification
+
+When `TAVILY_API_KEY` is set, the pipeline extracts phone numbers from the
+message (up to 2) and searches the live web for public scam/fraud reports
+about each number via [Tavily](https://tavily.com). If a number appears in
+scam-report results, this is treated as strong evidence toward a scam verdict
+and a red flag is added. This complements the local knowledge base (which
+catches scam **patterns**) with real-time, number-specific intelligence
+(which catches known scam **numbers**).
+
+- If `TAVILY_API_KEY` is not set, this feature silently no-ops — the app
+  works exactly as before.
+- Searches use `search_depth="basic"` for speed; a Tavily failure or timeout
+  never crashes `/analyze` (gracefully degrades to `checked: False`).
+- The pipeline graph is: `retrieve → web_verify → reason → format`.
 
 ## External network dependencies
 
